@@ -1,0 +1,6 @@
+student_id,first_name,last_name,email,enrollment_date,gpa,major
+S001,John,Smith,john.smith@university.edu,2023-08-15,3.75,Computer Science
+S002,Alice,Johnson,alice.johnson@university.edu,2023-08-15,3.92,Mathematics
+S003,Bob,Williams,bob.williams@university.edu,2022-08-15,3.45,Engineering
+S004,Carol,Brown,carol.brown@university.edu,2024-01-10,3.88,Physics
+S005,David,Davis,david.davis@university.edu,2023-08-15,2.95,Biology

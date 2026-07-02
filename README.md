@@ -8,6 +8,25 @@ This project pulls real historical stock price data, uses it to generate synthet
 
 The core design goal: separate the **immutable event stream** (trades) from the **derived, mutable state** (holdings), and treat the trading strategy as a pluggable input rather than a fixed pipeline behavior.
 
+## Getting Started
+
+1. Create a localstack account https://app.localstack.cloud/ and sign up for their snowflake local service
+2. Run localstack snowflake `docker compose up -d`
+3. Download the snow CLI from snowflake
+4. Add a connection
+
+```
+snow connection add \
+  --connection-name localstack \
+  --user test \
+  --password test \
+  --account test \
+  --host snowflake.localhost.localstack.cloud
+```
+
+4. Run sql files `snow sql -f <filename> --connection localstack`
+5. Stop localstack `docker compose down`
+
 ## Architecture
 
 ```
@@ -47,6 +66,7 @@ Alpaca API (historical OHLCV)
 
 ### Phase 1 — Setup & raw data
 
+- [x] Setup localstack snowflake for local development
 - [ ] Create Alpaca account, get API key
 - [ ] Pick a small set of tickers (5–10) to keep the project scoped
 - [ ] Pull historical daily OHLCV for chosen tickers, land in `raw_prices` (Snowflake)
