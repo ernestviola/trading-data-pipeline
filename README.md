@@ -27,6 +27,9 @@ snow connection add \
 4. Run sql files `snow sql -f <filename> --connection localstack`
 5. Stop localstack `docker compose down`
 
+6. `cd trading-api/` and create a python venv `python3 -m venv .venv`
+7. Install python requirements in trading-api/
+
 ## Architecture
 
 ```
@@ -67,10 +70,10 @@ Alpaca API (historical OHLCV)
 ### Phase 1 — Setup & raw data
 
 - [x] Setup localstack snowflake for local development
-- [ ] Create Alpaca account, get API key
-- [ ] Pick a small set of tickers (5–10) to keep the project scoped
+- [x] Create Alpaca account, get API key
+- [x] Pick a small set of tickers (5–10) to keep the project scoped
 - [ ] Pull historical daily OHLCV for chosen tickers, land in `raw_prices` (Snowflake)
-- [ ] Confirm schema: date, ticker, open, high, low, close, volume
+- [x] Confirm schema: date, ticker, open, high, low, close, volume
 
 ### Phase 2 — Trade generation
 

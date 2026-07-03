@@ -1,0 +1,22 @@
+CREATE DATABASE IF NOT EXISTS TRADING_PIPELINE;
+USE DATABASE TRADING_PIPELINE;
+
+CREATE TABLE IF NOT EXISTS RAW_PRICES (
+    symbol STRING,
+    timestamp TIMESTAMP_TZ,
+    open FLOAT,
+    high FLOAT,
+    low FLOAT,
+    close FLOAT,
+    volume FLOAT,
+    trade_count FLOAT,
+    vwap FLOAT
+);
+
+CREATE FILE FORMAT IF NOT EXISTS csv_format
+    TYPE = CSV
+    PARSE_HEADER = TRUE
+    FIELD_OPTIONALLY_ENCLOSED_BY = '"';
+
+CREATE STAGE IF NOT EXISTS raw_prices_stage
+    FILE_FORMAT = csv_format;

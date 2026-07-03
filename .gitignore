@@ -1,2 +1,5 @@
 .env
+.venv/
+data/
 volume/
+__pycache__/
