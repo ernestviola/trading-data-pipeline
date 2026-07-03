@@ -35,7 +35,7 @@ def main():
     end = datetime.now()
 
     for ticker in tickers:
-        main(ticker, start, end)
+        gather_historicals(ticker, start, end)
 
 
 if __name__ == "__main__":

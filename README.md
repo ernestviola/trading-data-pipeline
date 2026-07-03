@@ -10,25 +10,59 @@ The core design goal: separate the **immutable event stream** (trades) from the 
 
 ## Getting Started
 
-1. Create a localstack account https://app.localstack.cloud/ and sign up for their snowflake local service
-2. Run localstack snowflake `docker compose up -d`
-3. Download the snow CLI from snowflake
-4. Add a connection
+1. Create a [LocalStack account](https://app.localstack.cloud/) and sign up for their Snowflake local service (Trial plan, or apply for the free non-commercial OSS license since this repo is public).
+2. Copy `.exampleenv` to `.env` and fill in all required values (see below).
+3. Start the local Snowflake emulator:
+   ```bash
+   docker compose up -d
+   ```
+4. Install the [Snowflake CLI](https://docs.snowflake.com/en/developer-guide/snowflake-cli/installation/installation) (`snow`), then add a connection pointed at the emulator:
+   ```bash
+   snow connection add \
+     --connection-name localstack \
+     --user test \
+     --password test \
+     --account test \
+     --host snowflake.localhost.localstack.cloud
+   ```
+5. Run the setup SQL to create the database, table, file format, and stage:
+   ```bash
+   snow sql -f sql/001_setup_raw_prices.sql --connection localstack
+   ```
+6. Set up the Python environment:
+   ```bash
+   cd trading-api/
+   python3 -m venv .venv
+   source .venv/bin/activate
+   pip install -r requirements.txt
+   ```
+7. Create an [Alpaca account](https://alpaca.markets/) and generate API keys (paper trading is sufficient — no funding needed, this project only pulls historical market data).
+8. Run the pipeline:
+   ```bash
+   python main.py
+   ```
+9. When done, stop the emulator:
+   ```bash
+   docker compose down
+   ```
+
+### Required `.env` values
+
+`.exampleenv` documents these — copy it to `.env` (gitignored) and fill in:
 
 ```
-snow connection add \
-  --connection-name localstack \
-  --user test \
-  --password test \
-  --account test \
-  --host snowflake.localhost.localstack.cloud
+LOCALSTACK_AUTH_TOKEN=
+
+ALPACA_API_KEY=
+ALPACA_API_SECRET=
+
+SNOWFLAKE_USER=test
+SNOWFLAKE_PASSWORD=test
+SNOWFLAKE_ACCOUNT=test
+SNOWFLAKE_HOST=snowflake.localhost.localstack.cloud
 ```
 
-4. Run sql files `snow sql -f <filename> --connection localstack`
-5. Stop localstack `docker compose down`
-
-6. `cd trading-api/` and create a python venv `python3 -m venv .venv`
-7. Install python requirements in trading-api/
+> Note: LocalStack is ephemeral by default — data doesn't persist across container restarts unless volume persistence is configured (this repo's `docker-compose.yml` mounts `./volume:/var/lib/localstack` for this reason). If you `docker compose down` without that volume, you'll need to re-run step 5 on your next `docker compose up`.
 
 ## Architecture
 
@@ -57,6 +91,11 @@ Alpaca API (historical OHLCV)
    with retries + incremental logic
 ```
 
+**Local dev stack**, distinct from the pipeline architecture above:
+
+- **Snowflake** is emulated locally via [LocalStack for Snowflake](https://docs.localstack.cloud/snowflake/), running in Docker (`docker-compose.yml`) rather than a real cloud account — keeps the project runnable by anyone cloning the repo, no Snowflake trial account required.
+- Objects live under the `TRADING_PIPELINE` database (see `sql/001_setup_raw_prices.sql`), not the emulator's `test` default — keeps the schema intentional and matches how dbt will reference sources later.
+
 ## Key design decisions
 
 - **Source data pulled once, not on every run.** Alpaca free tier has no daily cap, but there's no reason to re-hit the API repeatedly for static historical data — it's landed once into a raw table and treated as the source of truth downstream.
@@ -64,16 +103,18 @@ Alpaca API (historical OHLCV)
 - **Holdings use SCD Type 2.** Position quantity and average cost basis change as new trades arrive. Instead of overwriting the current state, each change closes out the prior row (`end_date`, `is_current = false`) and inserts a new one — preserving full history and enabling point-in-time queries ("what did the portfolio look like on date X").
 - **Strategy is a parameter, not a branch.** The trade generator takes a `strategy` argument (starting with `mean_reversion`, with `momentum` supported later) and stamps each trade with `strategy_used`. Downstream models don't care which strategy produced a trade — this keeps the modeling/orchestration layer decoupled from trading logic, so adding a new strategy later requires no pipeline changes.
 - **Airflow orchestrates meaningfully, not trivially.** The DAG separates ingestion from transformation as distinct tasks, includes retry/failure handling, and drives incremental dbt runs rather than full-refreshing every time.
+- **Ingestion files are matched by column name, not position.** `COPY INTO` uses `MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE`, so CSVs are loaded using Alpaca's own response headers directly — no manual column-order mapping to keep in sync if Alpaca's schema changes.
+- **Load deduplication relies on Snowflake's own stage/file tracking**, not custom application state. `COPY INTO` against a given stage skips files it's already successfully loaded, so no separate "processed" tracking (renamed files, marker tables, etc.) is needed — one less thing that can drift out of sync.
 
 ## Todo
 
 ### Phase 1 — Setup & raw data
 
-- [x] Setup localstack snowflake for local development
+- [x] Setup LocalStack Snowflake for local development
 - [x] Create Alpaca account, get API key
-- [x] Pick a small set of tickers (5–10) to keep the project scoped
-- [ ] Pull historical daily OHLCV for chosen tickers, land in `raw_prices` (Snowflake)
-- [x] Confirm schema: date, ticker, open, high, low, close, volume
+- [x] Pick a small set of tickers (5–10) to keep the project scoped _(currently just `AAPL` in `main.py`)_
+- [x] Pull historical daily OHLCV for chosen tickers, land in `raw_prices` (Snowflake)
+- [x] Confirm schema: symbol, timestamp, open, high, low, close, volume, trade_count, vwap
 
 ### Phase 2 — Trade generation
 
@@ -110,11 +151,27 @@ Alpaca API (historical OHLCV)
 - [ ] dbt docs generated and reviewed
 - [ ] Sanity-check SCD2 output with a manual point-in-time query
 - [ ] (Stretch) Add `momentum` strategy as a second option to prove the pluggable design works
-- [ ] Clean repo structure, remove dead code/experiments before sharing
+- [ ] Clean repo structure, remove dead code/experiments before sharing _(e.g. `example/` folder — LocalStack quickstart scratch work, not part of the actual pipeline)_
+- [ ] Apply for LocalStack OSS/non-commercial license, since this repo is public
+
+## Repo structure
+
+```
+sql/                   DDL — database, table, file format, stage setup
+trading-api/
+  gather_historicals.py  Pulls historical OHLCV from Alpaca, writes to data/
+  load_to_snowflake.py   PUT + COPY INTO raw_prices
+  main.py                Entry point — loops tickers, gathers + loads
+  requirements.txt
+example/               LocalStack Snowflake quickstart scratch work (not part of the pipeline — candidate for removal in Phase 5)
+docker-compose.yml      LocalStack Snowflake emulator
+.exampleenv             Template for required environment variables
+```
 
 ## Stack
 
 - **Source**: Alpaca API (historical daily OHLCV, US equities)
-- **Warehouse**: Snowflake
+- **Warehouse**: Snowflake (emulated locally via [LocalStack for Snowflake](https://docs.localstack.cloud/snowflake/))
 - **Transformation**: dbt
 - **Orchestration**: Airflow
+- **Local dev tools**: Docker Compose, Snowflake CLI (`snow`), DBeaver (optional, for browsing/querying the emulator visually)
