@@ -104,7 +104,7 @@ Alpaca API (historical OHLCV)
 - **Strategy is a parameter, not a branch.** The trade generator takes a `strategy` argument (starting with `mean_reversion`, with `momentum` supported later) and stamps each trade with `strategy_used`. Downstream models don't care which strategy produced a trade — this keeps the modeling/orchestration layer decoupled from trading logic, so adding a new strategy later requires no pipeline changes.
 - **Airflow orchestrates meaningfully, not trivially.** The DAG separates ingestion from transformation as distinct tasks, includes retry/failure handling, and drives incremental dbt runs rather than full-refreshing every time.
 - **Ingestion files are matched by column name, not position.** `COPY INTO` uses `MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE`, so CSVs are loaded using Alpaca's own response headers directly — no manual column-order mapping to keep in sync if Alpaca's schema changes.
-- **Load deduplication relies on Snowflake's own stage/file tracking**, not custom application state. `COPY INTO` against a given stage skips files it's already successfully loaded, so no separate "processed" tracking (renamed files, marker tables, etc.) is needed — one less thing that can drift out of sync.
+- **Load deduplication uses a staging table + `MERGE`, not raw file/stage tracking.** CSVs land in a staging table via `COPY INTO`, then a `MERGE INTO` the target table (matched on natural keys like symbol/timestamp for prices, or ticker/date for trades) inserts only genuinely new rows. This was chosen over relying on Snowflake's stage/file-load tracking alone, since that only prevents re-loading an identical file — it doesn't catch two different files covering overlapping date ranges, which caused duplicate rows in practice.
 
 ## Todo
 
@@ -167,6 +167,8 @@ trading-scripts/
   load_to_snowflake.py   PUT + COPY INTO raw_prices
   main.py                Entry point — loops tickers, gathers + loads
   requirements.txt
+  strategies/
+   mean_reversion.py
 example/               LocalStack Snowflake quickstart scratch work (not part of the pipeline — candidate for removal in Phase 5)
 docker-compose.yml      LocalStack Snowflake emulator
 .exampleenv             Template for required environment variables
