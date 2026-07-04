@@ -1,7 +1,7 @@
 services:
   localstack:
+    image: localstack/snowflake:2026.06.0
     container_name: localstack-main
-    image: localstack/snowflake
     ports:
       - '127.0.0.1:4566:4566'
       - '127.0.0.1:443:443'

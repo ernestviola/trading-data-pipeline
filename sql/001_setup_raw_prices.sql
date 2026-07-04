@@ -1,48 +1,36 @@
-CREATE DATABASE IF NOT EXISTS TRADING_PIPELINE;
-USE DATABASE TRADING_PIPELINE;
+-- psql -h localhost -U ernest -d trading_pipeline -f sql/001_setup_raw_prices.sql
 
-CREATE TABLE IF NOT EXISTS RAW_PRICES (
-    symbol STRING,
-    timestamp TIMESTAMP_TZ,
-    open FLOAT,
-    high FLOAT,
-    low FLOAT,
-    close FLOAT,
-    volume FLOAT,
-    trade_count FLOAT,
-    vwap FLOAT
+CREATE TABLE IF NOT EXISTS raw_prices (
+    symbol TEXT,
+    "timestamp" TIMESTAMPTZ,
+    open FLOAT8,
+    high FLOAT8,
+    low FLOAT8,
+    close FLOAT8,
+    volume FLOAT8,
+    trade_count FLOAT8,
+    vwap FLOAT8
 );
 
-CREATE TABLE IF NOT EXISTS RAW_PRICES_STAGING LIKE RAW_PRICES;
+CREATE TABLE IF NOT EXISTS raw_prices_staging (LIKE raw_prices INCLUDING ALL);
 
-CREATE FILE FORMAT IF NOT EXISTS CSV_FORMAT
-    TYPE = CSV
-    PARSE_HEADER = TRUE
-    FIELD_OPTIONALLY_ENCLOSED_BY = '"';
-
-CREATE STAGE IF NOT EXISTS RAW_PRICES_STAGE
-    FILE_FORMAT = CSV_FORMAT;
-
-CREATE TABLE IF NOT EXISTS RAW_TRADES (
-    SYMBOL STRING,
-    "DATE" TIMESTAMP_TZ,
-    PRICE FLOAT,
-    HIGH FLOAT,
-    LOW FLOAT,
-    "CLOSE" FLOAT,
-    VOLUME FLOAT,
-    TRADE_COUNT FLOAT,
-    VWAP FLOAT,
-    ROLLING_MEAN FLOAT,
-    ROLLING_STD FLOAT,
-    Z_SCORE FLOAT,
-    SIDE STRING,
-    TICKER STRING,
-    STRATEGY_USED STRING,
-    QUANTITY FLOAT
+CREATE TABLE IF NOT EXISTS raw_trades (
+    symbol TEXT,
+    "date" TIMESTAMPTZ,
+    price FLOAT8,
+    high FLOAT8,
+    low FLOAT8,
+    close FLOAT8,
+    volume FLOAT8,
+    trade_count FLOAT8,
+    vwap FLOAT8,
+    rolling_mean FLOAT8,
+    rolling_std FLOAT8,
+    z_score FLOAT8,
+    side TEXT,
+    ticker TEXT,
+    strategy_used TEXT,
+    quantity FLOAT8
 );
 
-CREATE TABLE IF NOT EXISTS RAW_TRADES_STAGING LIKE RAW_TRADES;
-
-CREATE STAGE IF NOT EXISTS RAW_TRADES_STAGE
-    FILE_FORMAT = CSV_FORMAT;
+CREATE TABLE IF NOT EXISTS raw_trades_staging (LIKE raw_trades INCLUDING ALL);

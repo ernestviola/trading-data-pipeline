@@ -10,59 +10,57 @@ The core design goal: separate the **immutable event stream** (trades) from the 
 
 ## Getting Started
 
-1. Create a [LocalStack account](https://app.localstack.cloud/) and sign up for their Snowflake local service (Trial plan, or apply for the free non-commercial OSS license since this repo is public).
+1. Make sure you have a Postgres instance running (Docker is easiest — see below if you don't already have one).
 2. Copy `.exampleenv` to `.env` and fill in all required values (see below).
-3. Start the local Snowflake emulator:
+3. Create the database and load the schema:
    ```bash
-   docker compose up -d
+   docker exec -it <container_name> psql -U <user> -d <default_db> -c "CREATE DATABASE trading_pipeline;"
+   docker exec -i <container_name> psql -U <user> -d trading_pipeline < sql/001_setup_raw_prices.sql
    ```
-4. Install the [Snowflake CLI](https://docs.snowflake.com/en/developer-guide/snowflake-cli/installation/installation) (`snow`), then add a connection pointed at the emulator:
-   ```bash
-   snow connection add \
-     --connection-name localstack \
-     --user test \
-     --password test \
-     --account test \
-     --host snowflake.localhost.localstack.cloud
-   ```
-5. Run the setup SQL to create the database, table, file format, and stage:
-   ```bash
-   snow sql -f sql/001_setup_raw_prices.sql --connection localstack
-   ```
-6. Set up the Python environment:
+4. Set up the Python environment:
    ```bash
    cd trading-scripts/
    python3 -m venv .venv
    source .venv/bin/activate
    pip install -r requirements.txt
    ```
-7. Create an [Alpaca account](https://alpaca.markets/) and generate API keys (paper trading is sufficient — no funding needed, this project only pulls historical market data).
-8. Run the pipeline:
+5. Create an [Alpaca account](https://alpaca.markets/) and generate API keys (paper trading is sufficient — no funding needed, this project only pulls historical market data).
+6. Run the pipeline:
    ```bash
    python main.py
    ```
-9. When done, stop the emulator:
-   ```bash
-   docker compose down
-   ```
+
+### Don't have Postgres running yet?
+
+A minimal `docker-compose.yml` works fine:
+
+```yaml
+services:
+  postgres:
+    image: postgres:16
+    container_name: trading-postgres
+    environment:
+      - POSTGRES_USER=trading
+      - POSTGRES_PASSWORD=trading
+      - POSTGRES_DB=trading_pipeline
+    ports:
+      - '127.0.0.1:5432:5432'
+    volumes:
+      - './volume:/var/lib/postgresql/data'
+```
+
+Volume-mounted, so data persists across `docker compose down`/`up` with no extra config needed.
 
 ### Required `.env` values
 
 `.exampleenv` documents these — copy it to `.env` (gitignored) and fill in:
 
 ```
-LOCALSTACK_AUTH_TOKEN=
-
 ALPACA_API_KEY=
 ALPACA_API_SECRET=
 
-SNOWFLAKE_USER=test
-SNOWFLAKE_PASSWORD=test
-SNOWFLAKE_ACCOUNT=test
-SNOWFLAKE_HOST=snowflake.localhost.localstack.cloud
+DATABASE_URL=postgresql://trading:trading@localhost:5432/trading_pipeline
 ```
-
-> Note: LocalStack is ephemeral by default — data doesn't persist across container restarts unless volume persistence is configured (this repo's `docker-compose.yml` mounts `./volume:/var/lib/localstack` for this reason). If you `docker compose down` without that volume, you'll need to re-run step 5 on your next `docker compose up`.
 
 ## Architecture
 
@@ -93,8 +91,8 @@ Alpaca API (historical OHLCV)
 
 **Local dev stack**, distinct from the pipeline architecture above:
 
-- **Snowflake** is emulated locally via [LocalStack for Snowflake](https://docs.localstack.cloud/snowflake/), running in Docker (`docker-compose.yml`) rather than a real cloud account — keeps the project runnable by anyone cloning the repo, no Snowflake trial account required.
-- Objects live under the `TRADING_PIPELINE` database (see `sql/001_setup_raw_prices.sql`), not the emulator's `test` default — keeps the schema intentional and matches how dbt will reference sources later.
+- **Postgres** runs locally in Docker (`docker-compose.yml`) — keeps the project runnable by anyone cloning the repo, no cloud account or trial license required.
+- Objects live in the `trading_pipeline` database (see `sql/001_setup_raw_prices.sql`), created explicitly rather than reused from another local project's database — keeps the schema intentional and matches how dbt will reference sources later.
 
 ## Key design decisions
 
@@ -103,17 +101,17 @@ Alpaca API (historical OHLCV)
 - **Holdings use SCD Type 2.** Position quantity and average cost basis change as new trades arrive. Instead of overwriting the current state, each change closes out the prior row (`end_date`, `is_current = false`) and inserts a new one — preserving full history and enabling point-in-time queries ("what did the portfolio look like on date X").
 - **Strategy is a parameter, not a branch.** The trade generator takes a `strategy` argument (starting with `mean_reversion`, with `momentum` supported later) and stamps each trade with `strategy_used`. Downstream models don't care which strategy produced a trade — this keeps the modeling/orchestration layer decoupled from trading logic, so adding a new strategy later requires no pipeline changes.
 - **Airflow orchestrates meaningfully, not trivially.** The DAG separates ingestion from transformation as distinct tasks, includes retry/failure handling, and drives incremental dbt runs rather than full-refreshing every time.
-- **Ingestion files are matched by column name, not position.** `COPY INTO` uses `MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE`, so CSVs are loaded using Alpaca's own response headers directly — no manual column-order mapping to keep in sync if Alpaca's schema changes.
-- **Load deduplication uses a staging table + `MERGE`, not raw file/stage tracking.** CSVs land in a staging table via `COPY INTO`, then a `MERGE INTO` the target table (matched on natural keys like symbol/timestamp for prices, or ticker/date for trades) inserts only genuinely new rows. This was chosen over relying on Snowflake's stage/file-load tracking alone, since that only prevents re-loading an identical file — it doesn't catch two different files covering overlapping date ranges, which caused duplicate rows in practice.
+- **Load deduplication uses a staging table + `MERGE`.** CSVs land in a staging table via `COPY`, then a `MERGE INTO` the target table (matched on natural keys like symbol/timestamp for prices, or ticker/date for trades) inserts only genuinely new rows. This catches overlapping-date-range files that a simple "have I loaded this exact file before" check wouldn't — which caused duplicate rows in practice during early development.
+- **Ingestion loads by explicit column list, not implicit header matching.** Postgres's `COPY ... HEADER true` verifies a header row exists but loads positionally rather than matching by column name — unlike Snowflake's `MATCH_BY_COLUMN_NAME`, there's no built-in reordering safety net here if Alpaca's CSV column order ever drifts, so this is a known tradeoff of the current implementation.
 
 ## Todo
 
 ### Phase 1 — Setup & raw data
 
-- [x] Setup LocalStack Snowflake for local development
+- [x] Setup local Postgres for development
 - [x] Create Alpaca account, get API key
 - [x] Pick a small set of tickers (5–10) to keep the project scoped _(currently just `AAPL` in `main.py`)_
-- [x] Pull historical daily OHLCV for chosen tickers, land in `raw_prices` (Snowflake)
+- [x] Pull historical daily OHLCV for chosen tickers, land in `raw_prices` (Postgres)
 - [x] Confirm schema: symbol, timestamp, open, high, low, close, volume, trade_count, vwap
 
 ### Phase 2 — Trade generation
@@ -126,11 +124,11 @@ Alpaca API (historical OHLCV)
 - [ ] Cap trade size to available cash on buys; skip or reduce sells if the simulated position doesn't hold enough shares
 - [ ] Document the sizing formula and its parameters (base position size, max multiplier, starting cash) in the README, since they're arbitrary choices that should be defensible/explained
 - [x] Generate `raw_trades` output with `strategy_used`, ticker, date, side, quantity, price
-- [x] Load `raw_trades` into Snowflake
+- [x] Load `raw_trades` into Postgres
 
 ### Phase 3 — dbt modeling
 
-- [ ] Set up dbt project, connect to Snowflake
+- [ ] Set up dbt project (`dbt-postgres` adapter), connect to Postgres
 - [ ] Define sources + freshness checks for `raw_prices` and `raw_trades`
 - [ ] Staging models: `stg_prices`, `stg_trades` (clean/rename/cast)
 - [ ] Intermediate model: compute running position/cost-basis changes from trades
@@ -155,29 +153,27 @@ Alpaca API (historical OHLCV)
 - [ ] dbt docs generated and reviewed
 - [ ] Sanity-check SCD2 output with a manual point-in-time query
 - [ ] (Stretch) Add `momentum` strategy as a second option to prove the pluggable design works
-- [ ] Clean repo structure, remove dead code/experiments before sharing _(e.g. `example/` folder — LocalStack quickstart scratch work, not part of the actual pipeline)_
-- [ ] Apply for LocalStack OSS/non-commercial license, since this repo is public
+- [ ] Clean repo structure, remove dead code/experiments before sharing
 
 ## Repo structure
 
 ```
-sql/                   DDL — database, table, file format, stage setup
+sql/                   DDL — database and table setup
 trading-scripts/
   gather_historicals.py  Pulls historical OHLCV from Alpaca, writes to data/
-  load_to_snowflake.py   PUT + COPY INTO raw_prices
+  load_to_database.py    COPY + staging-table MERGE into raw_prices / raw_trades
   main.py                Entry point — loops tickers, gathers + loads
   requirements.txt
   strategies/
    mean_reversion.py
-example/               LocalStack Snowflake quickstart scratch work (not part of the pipeline — candidate for removal in Phase 5)
-docker-compose.yml      LocalStack Snowflake emulator
+docker-compose.yml      Local Postgres (optional, if not already running one)
 .exampleenv             Template for required environment variables
 ```
 
 ## Stack
 
 - **Source**: Alpaca API (historical daily OHLCV, US equities)
-- **Warehouse**: Snowflake (emulated locally via [LocalStack for Snowflake](https://docs.localstack.cloud/snowflake/))
-- **Transformation**: dbt
+- **Warehouse**: Postgres (local, via Docker)
+- **Transformation**: dbt (`dbt-postgres`)
 - **Orchestration**: Airflow
-- **Local dev tools**: Docker Compose, Snowflake CLI (`snow`), DBeaver (optional, for browsing/querying the emulator visually)
+- **Local dev tools**: Docker Compose, `psql` (via `docker exec`), DBeaver (optional, for browsing/querying visually)
