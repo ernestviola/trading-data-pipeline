@@ -4,3 +4,9 @@ data/
 volume/
 __pycache__/
 profiles.yml
+
+# dbt
+target/
+dbt_packages/
+logs/
+.user.yml

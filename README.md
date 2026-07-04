@@ -118,18 +118,13 @@ Alpaca API (historical OHLCV)
 
 - [x] Write script to compute rolling mean + stddev per ticker
 - [x] Implement mean-reversion signal (buy below threshold, sell above threshold)
-- [ ] Parameterize `strategy` argument (even if only `mean_reversion` is implemented now)
-- [ ] Track simulated cash balance, derived by replaying trades in order (starting cash − buys + sells) — not stored as a column, kept consistent with the append-only design
-- [ ] Size each trade using signal-strength-scaled quantity: position size scales with how far price deviates from the rolling mean (larger z-score → larger position), rather than a fixed share count or dollar amount
-- [ ] Cap trade size to available cash on buys; skip or reduce sells if the simulated position doesn't hold enough shares
-- [ ] Document the sizing formula and its parameters (base position size, max multiplier, starting cash) in the README, since they're arbitrary choices that should be defensible/explained
 - [x] Generate `raw_trades` output with `strategy_used`, ticker, date, side, quantity, price
 - [x] Load `raw_trades` into Postgres
 
 ### Phase 3 — dbt modeling
 
 - [ ] Set up dbt project (`dbt-postgres` adapter), connect to Postgres
-- [ ] Define sources + freshness checks for `raw_prices` and `raw_trades`
+- [ ] Define sources for `raw_prices` and `raw_trades`
 - [ ] Staging models: `stg_prices`, `stg_trades` (clean/rename/cast)
 - [ ] Intermediate model: compute running position/cost-basis changes from trades
 - [ ] Marts: `holdings_scd2` (SCD Type 2 dimension)
@@ -146,6 +141,25 @@ Alpaca API (historical OHLCV)
 - [ ] Add retry/failure handling (not just Airflow defaults)
 - [ ] Add a sensor or dependency check (e.g. don't run dbt until new trade data lands)
 - [ ] Confirm DAG supports incremental runs, not full reprocessing each time
+
+### Phase 4.5 — Revisit before polish
+
+From Phase 2 (trade sizing realism):
+
+- [ ] Parameterize `strategy` argument (even if only `mean_reversion` is implemented now)
+- [ ] Track simulated cash balance, derived by replaying trades in order (starting cash − buys + sells)
+- [ ] Size each trade using signal-strength-scaled quantity (larger z-score → larger position)
+- [ ] Cap trade size to available cash on buys; skip/reduce sells if position doesn't hold enough shares
+- [ ] Document the sizing formula and its parameters in the README
+
+From Phase 3 (source freshness — deferred since raw data isn't pulled on a schedule):
+
+- [ ] Revisit source freshness checks IF ingestion becomes periodic rather than one-time
+- [ ] Until then, replace with a simpler row-count-based source test
+
+Validation note:
+
+- [ ] Once Phase 4.5 sizing changes land, re-validate `holdings_scd2` output values — the row-versioning mechanism built in Phase 3 doesn't need to change, but the quantity/cost-basis numbers running through it will
 
 ### Phase 5 — Polish
 
