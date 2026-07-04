@@ -31,7 +31,7 @@ The core design goal: separate the **immutable event stream** (trades) from the 
    ```
 6. Set up the Python environment:
    ```bash
-   cd trading-api/
+   cd trading-scripts/
    python3 -m venv .venv
    source .venv/bin/activate
    pip install -r requirements.txt
@@ -118,11 +118,15 @@ Alpaca API (historical OHLCV)
 
 ### Phase 2 — Trade generation
 
-- [ ] Write script to compute rolling mean + stddev per ticker
-- [ ] Implement mean-reversion signal (buy below threshold, sell above threshold)
+- [x] Write script to compute rolling mean + stddev per ticker
+- [x] Implement mean-reversion signal (buy below threshold, sell above threshold)
 - [ ] Parameterize `strategy` argument (even if only `mean_reversion` is implemented now)
-- [ ] Generate `raw_trades` output with `strategy_used`, ticker, date, side, quantity, price
-- [ ] Load `raw_trades` into Snowflake
+- [ ] Track simulated cash balance, derived by replaying trades in order (starting cash − buys + sells) — not stored as a column, kept consistent with the append-only design
+- [ ] Size each trade using signal-strength-scaled quantity: position size scales with how far price deviates from the rolling mean (larger z-score → larger position), rather than a fixed share count or dollar amount
+- [ ] Cap trade size to available cash on buys; skip or reduce sells if the simulated position doesn't hold enough shares
+- [ ] Document the sizing formula and its parameters (base position size, max multiplier, starting cash) in the README, since they're arbitrary choices that should be defensible/explained
+- [x] Generate `raw_trades` output with `strategy_used`, ticker, date, side, quantity, price
+- [x] Load `raw_trades` into Snowflake
 
 ### Phase 3 — dbt modeling
 
@@ -158,7 +162,7 @@ Alpaca API (historical OHLCV)
 
 ```
 sql/                   DDL — database, table, file format, stage setup
-trading-api/
+trading-scripts/
   gather_historicals.py  Pulls historical OHLCV from Alpaca, writes to data/
   load_to_snowflake.py   PUT + COPY INTO raw_prices
   main.py                Entry point — loops tickers, gathers + loads
