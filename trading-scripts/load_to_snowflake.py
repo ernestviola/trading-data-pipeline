@@ -17,44 +17,34 @@ conn = snowflake.connector.connect(
 cs = conn.cursor()
 
 
-def load_to_snowflake(csv_path: Path):
+def load_csv_to_snowflake(table_name, matching_sql, csv_path: Path):
+    print("Processing: ", csv_path)
     put_result = cs.execute(
-        f"PUT file://{csv_path} @raw_prices_stage AUTO_COMPRESS=TRUE"
+        f"PUT file://{csv_path} @{table_name}_stage AUTO_COMPRESS=TRUE"
     )
 
     copy_result = cs.execute(f"""
-               COPY INTO RAW_PRICES_STAGING
-               FROM @raw_prices_stage
+               COPY INTO {table_name}_STAGING
+               FROM @{table_name}_stage
                MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE
                PATTERN = '.*{csv_path.name}.*'
                ON_ERROR = 'CONTINUE'
                """)
 
-    cs.execute("""
-            MERGE INTO RAW_PRICES AS target
-            USING RAW_PRICES_STAGING AS source
-            on target.symbol = source.symbol AND target.timestamp = source.timestamp
+    cs.execute(f"DESCRIBE TABLE {table_name}")
+    column_names = cs.fetchall()
+    target = ['"' + row[0] + '"' for row in column_names]
+    source = ['source."' + row[0] + '"' for row in column_names]
+
+    cs.execute(f"""
+            MERGE INTO {table_name} AS target
+            USING {table_name}_STAGING AS source
+            {matching_sql}
             WHEN NOT MATCHED THEN
                 INSERT(
-                    SYMBOL,
-                    TIMESTAMP,
-                    "OPEN",
-                    HIGH,
-                    LOW,
-                    "CLOSE",
-                    "VOLUME",
-                    TRADE_COUNT,
-                    VWAP)
+                    {", ".join(target)})
                 VALUES(
-                    source.SYMBOL,
-                    source.TIMESTAMP,
-                    source.OPEN,
-                    source.HIGH,
-                    source.LOW,
-                    source.CLOSE,
-                    source.VOLUME,
-                    source.TRADE_COUNT,
-                    source.VWAP);
+                    {", ".join(source)});
             """)
 
-    cs.execute("TRUNCATE TABLE RAW_PRICES_STAGING;")
+    # cs.execute(f"TRUNCATE TABLE {table_name}_STAGING;")

@@ -1,13 +1,26 @@
 from gather_historicals import gather_historicals
-from load_to_snowflake import load_to_snowflake
+from load_to_snowflake import load_csv_to_snowflake
 from datetime import datetime
-from stats.moving_avg import moving_avg
+from strategies.mean_reversion import mean_reversion
 
 
 def step_1(tickers, start, end):
     for ticker in tickers:
         csv_path = gather_historicals(ticker, start, end)
-        load_to_snowflake(csv_path)
+        load_csv_to_snowflake(
+            "RAW_PRICES",
+            "on target.symbol = source.symbol AND target.timestamp = source.timestamp",
+            csv_path,
+        )
+
+
+def step_2():
+    csv_path = mean_reversion("AAPL", 20, 1.5)
+    load_csv_to_snowflake(
+        "RAW_TRADES",
+        'on target.TICKER = source.TICKER AND target."DATE" = source."DATE"',
+        csv_path,
+    )
 
 
 def main():
@@ -16,7 +29,7 @@ def main():
     end = datetime.now()
 
     step_1(tickers, start, end)
-    moving_avg("AAPL", 20)
+    step_2()
 
 
 #     - [ ] Write script to compute rolling mean + stddev per ticker
