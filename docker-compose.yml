@@ -7,7 +7,8 @@ x-airflow-common: &airflow-common
     AIRFLOW__CORE__EXECUTOR: LocalExecutor
     AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: ${AIRFLOW_META_CONN}
     AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
-    DATABASE_URL: ${DATABASE_URL}
+    AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_SECRET_KEY}
+    DATABASE_URL: ${AIRFLOW_DATABASE_URL}
     PYTHONPATH: /opt/airflow/trading-scripts
   volumes:
     - ./airflow/dags:/opt/airflow/dags

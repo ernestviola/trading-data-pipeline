@@ -30,3 +30,6 @@ clean-targets: # directories to be removed by `dbt clean`
 models:
   trading_dbt:
     # Config indicated by + and applies to all files under models/example/
+
+vars:
+  starting_cash: "{{ env_var('STARTING_CASH', 10000) }}"

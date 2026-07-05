@@ -64,6 +64,16 @@ def mean_reversion(
         shares_held=shares_held,
     )
 
-    output_columns = ["ticker", "date", "side", "quantity", "price", "strategy_used"]
+    raw_trades["signal_strength"] = abs(raw_trades["z_score"])
+
+    output_columns = [
+        "ticker",
+        "date",
+        "side",
+        "quantity",
+        "price",
+        "strategy_used",
+        "signal_strength",
+    ]
     raw_trades[output_columns].to_csv(filepath, index=False)
     return filepath

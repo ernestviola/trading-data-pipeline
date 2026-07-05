@@ -12,3 +12,18 @@ models:
       - name: shares_held
         tests:
           - not_null
+  - name: int_portfolio_cash
+    columns:
+      - name: ticker
+        tests:
+          - not_null
+      - name: trade_date
+        tests:
+          - not_null
+      - name: cash_after
+        tests:
+          - not_null
+      - name: rn
+        tests:
+          - not_null
+          - unique

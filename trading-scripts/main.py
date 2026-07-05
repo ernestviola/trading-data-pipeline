@@ -2,6 +2,7 @@ from gather_historicals import gather_historicals
 from load_to_database import load_csv_to_postgres
 from datetime import datetime
 from strategies import STRATEGIES
+import os
 
 
 def step_1(tickers, start, end):
@@ -44,11 +45,12 @@ def step_2(
 
 
 def main():
+    STARTING_CASH = int(os.getenv("STARTING_CASH", 10000))
+
     tickers = ["AAPL"]
     start = datetime(2023, 1, 1)
     end = datetime.now()
     window = 20
-    starting_cash = 10000
     base_position_size = 500
     z_threshold = 1.5
     max_multiplier = 3
@@ -59,7 +61,7 @@ def main():
         tickers,
         "mean_reversion",
         window,
-        starting_cash,
+        STARTING_CASH,
         base_position_size,
         z_threshold,
         max_multiplier,
