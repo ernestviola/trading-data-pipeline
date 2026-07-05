@@ -98,6 +98,19 @@ Alpaca API (historical OHLCV)
 
 - **Source data pulled once, not on every run.** Alpaca free tier has no daily cap, but there's no reason to re-hit the API repeatedly for static historical data — it's landed once into a raw table and treated as the source of truth downstream.
 - **Trades are append-only.** Each generated trade is an immutable event. No updates, no deletes — this is the fact stream.
+- **Trade sizing scales with signal strength, not fixed.** Each trade's quantity is derived from how far the price deviates from the rolling mean, capped by available cash/position:
+
+  ```
+  quantity = (base_position_size * min(abs(z_score) / z_threshold, max_multiplier)) / price
+  ```
+
+  - `starting_cash = $10,000` — arbitrary round number, easy to sanity-check by hand.
+  - `base_position_size = $500` — dollar-denominated (not a fixed share count) so trade size scales consistently across tickers at different price points.
+  - `z_threshold = 1.5` — the same threshold used to trigger a buy/sell signal; a trade right at the threshold gets exactly `base_position_size`.
+  - `max_multiplier = 3` — caps position size at 3x base ($1,500) for extreme z-scores, preventing one outlier signal from disproportionately sizing a single trade.
+
+  After computing the desired quantity, buys are capped to `available_cash / price` and sells are capped to current shares held — trades are reduced (not skipped outright, unless the cap is 0) if the simulated portfolio can't fully support the desired size. Cash and position are tracked in-memory as trades are generated, replaying in chronological order per ticker — but neither is stored as a column in `raw_trades`, consistent with the append-only, immutable-event design. Position/cash state is meant to be re-derived downstream (in dbt) from the trade event stream itself, not trusted from a Python-side precomputation.
+
 - **Holdings use SCD Type 2.** Position quantity and average cost basis change as new trades arrive. Instead of overwriting the current state, each change closes out the prior row (`end_date`, `is_current = false`) and inserts a new one — preserving full history and enabling point-in-time queries ("what did the portfolio look like on date X").
 - **Strategy is a parameter, not a branch.** The trade generator takes a `strategy` argument (starting with `mean_reversion`, with `momentum` supported later) and stamps each trade with `strategy_used`. Downstream models don't care which strategy produced a trade — this keeps the modeling/orchestration layer decoupled from trading logic, so adding a new strategy later requires no pipeline changes.
 - **Airflow orchestrates meaningfully, not trivially.** The DAG separates ingestion from transformation as distinct tasks, includes retry/failure handling, and drives incremental dbt runs rather than full-refreshing every time.
@@ -123,15 +136,15 @@ Alpaca API (historical OHLCV)
 
 ### Phase 3 — dbt modeling
 
-- [ ] Set up dbt project (`dbt-postgres` adapter), connect to Postgres
-- [ ] Define sources for `raw_prices` and `raw_trades`
-- [ ] Staging models: `stg_prices`, `stg_trades` (clean/rename/cast)
-- [ ] Intermediate model: compute running position/cost-basis changes from trades
-- [ ] Marts: `holdings_scd2` (SCD Type 2 dimension)
-- [ ] Marts: `portfolio_value` (daily fact — position × price)
-- [ ] Add generic tests (not null, unique, relationships) on key models
-- [ ] Add at least one custom test (e.g. no overlapping SCD2 date ranges)
-- [ ] Implement one model as incremental (merge strategy, not full refresh)
+- [x] Set up dbt project (`dbt-postgres` adapter), connect to Postgres
+- [x] Define sources for `raw_prices` and `raw_trades`
+- [x] Staging models: `stg_prices`, `stg_trades` (clean/rename/cast)
+- [x] Intermediate model: compute running position/cost-basis changes from trades
+- [x] Marts: `holdings_scd2` (SCD Type 2 dimension)
+- [x] Marts: `portfolio_value` (daily fact — position × price)
+- [x] Add generic tests (not null, unique, relationships) on key models
+- [x] Add at least one custom test (e.g. no overlapping SCD2 date ranges)
+- [x] Implement one model as incremental (merge strategy, not full refresh)
 
 ### Phase 4 — Orchestration
 
@@ -147,10 +160,10 @@ Alpaca API (historical OHLCV)
 From Phase 2 (trade sizing realism):
 
 - [ ] Parameterize `strategy` argument (even if only `mean_reversion` is implemented now)
-- [ ] Track simulated cash balance, derived by replaying trades in order (starting cash − buys + sells)
-- [ ] Size each trade using signal-strength-scaled quantity (larger z-score → larger position)
-- [ ] Cap trade size to available cash on buys; skip/reduce sells if position doesn't hold enough shares
-- [ ] Document the sizing formula and its parameters in the README
+- [x] Track simulated cash balance, derived by replaying trades in order (starting cash − buys + sells)
+- [x] Size each trade using signal-strength-scaled quantity (larger z-score → larger position)
+- [x] Cap trade size to available cash on buys; skip/reduce sells if position doesn't hold enough shares
+- [x] Document the sizing formula and its parameters in the README
 
 From Phase 3 (source freshness — deferred since raw data isn't pulled on a schedule):
 

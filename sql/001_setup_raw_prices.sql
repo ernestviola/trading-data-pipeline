@@ -14,23 +14,13 @@ CREATE TABLE IF NOT EXISTS raw_prices (
 
 CREATE TABLE IF NOT EXISTS raw_prices_staging (LIKE raw_prices INCLUDING ALL);
 
-CREATE TABLE IF NOT EXISTS raw_trades (
-    symbol TEXT,
-    "date" TIMESTAMPTZ,
-    price FLOAT8,
-    high FLOAT8,
-    low FLOAT8,
-    close FLOAT8,
-    volume FLOAT8,
-    trade_count FLOAT8,
-    vwap FLOAT8,
-    rolling_mean FLOAT8,
-    rolling_std FLOAT8,
-    z_score FLOAT8,
-    side TEXT,
+CREATE TABLE IF NOT EXISTS public.raw_trades (
     ticker TEXT,
-    strategy_used TEXT,
-    quantity FLOAT8
+    "date" TIMESTAMPTZ,
+    side TEXT,
+    quantity FLOAT8,
+    price FLOAT8,
+    strategy_used TEXT
 );
 
-CREATE TABLE IF NOT EXISTS raw_trades_staging (LIKE raw_trades INCLUDING ALL);
+CREATE TABLE IF NOT EXISTS public.raw_trades_staging (LIKE raw_trades INCLUDING ALL);

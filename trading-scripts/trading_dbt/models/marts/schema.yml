@@ -1,0 +1,26 @@
+version: 2
+
+models:
+  - name: holdings_scd2
+    columns:
+      - name: ticker
+        tests:
+          - not_null
+      - name: start_date
+        tests:
+          - not_null
+      - name: is_current
+        tests:
+          - not_null
+
+  - name: portfolio_value
+    columns:
+      - name: ticker
+        tests:
+          - not_null
+      - name: price_date
+        tests:
+          - not_null
+      - name: market_value
+        tests:
+          - not_null
