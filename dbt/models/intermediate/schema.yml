@@ -1,0 +1,14 @@
+version: 2
+
+models:
+  - name: int_position_cost_basis
+    columns:
+      - name: ticker
+        tests:
+          - not_null
+      - name: trade_date
+        tests:
+          - not_null
+      - name: shares_held
+        tests:
+          - not_null
