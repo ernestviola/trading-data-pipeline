@@ -204,3 +204,13 @@ docker-compose.yml      Local Postgres (optional, if not already running one)
 - **Transformation**: dbt (`dbt-postgres`)
 - **Orchestration**: Airflow
 - **Local dev tools**: Docker Compose, `psql` (via `docker exec`), DBeaver (optional, for browsing/querying visually)
+
+## Note
+
+Airflow runs earlier versions of
+pandas
+numpy
+psycopg2-binary
+python-dotenv
+
+We may swap the trading-scripts versions down to match constraints
