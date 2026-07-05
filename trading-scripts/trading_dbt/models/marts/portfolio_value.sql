@@ -10,8 +10,8 @@ select
     h.shares_held,
     h.avg_cost,
     h.shares_held * p.close as market_value,
-    h.shares_held * h.avg_cost as cost_basis,
-    (h.shares_held * p.close) - (h.shares_held * h.avg_cost) as unrealized_gain_loss
+    h.cost_basis
+    (h.shares_held * p.close) - h.cost_basis as unrealized_gain_loss
 from {{ ref('stg_prices') }} p
 join {{ ref('holdings_scd2') }} h
     on p.symbol = h.ticker

@@ -1,7 +1,7 @@
 from gather_historicals import gather_historicals
 from load_to_database import load_csv_to_postgres
 from datetime import datetime
-from strategies.mean_reversion import mean_reversion
+from strategies import STRATEGIES
 
 
 def step_1(tickers, start, end):
@@ -16,6 +16,7 @@ def step_1(tickers, start, end):
 
 def step_2(
     tickers,
+    strategy,
     window,
     starting_cash,
     base_position_size,
@@ -23,8 +24,9 @@ def step_2(
     max_multiplier,
     shares_held,
 ):
+    strategy_fn = STRATEGIES[strategy]
     for ticker in tickers:
-        csv_path = mean_reversion(
+        csv_path = strategy_fn(
             ticker,
             window,
             starting_cash,
@@ -32,6 +34,7 @@ def step_2(
             z_threshold,
             max_multiplier,
             shares_held,
+            strategy_used=strategy,
         )
         load_csv_to_postgres(
             "raw_trades",
@@ -54,6 +57,7 @@ def main():
     step_1(tickers, start, end)
     step_2(
         tickers,
+        "mean_reversion",
         window,
         starting_cash,
         base_position_size,

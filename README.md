@@ -159,7 +159,7 @@ Alpaca API (historical OHLCV)
 
 From Phase 2 (trade sizing realism):
 
-- [ ] Parameterize `strategy` argument (even if only `mean_reversion` is implemented now)
+- [x] Parameterize `strategy` argument (even if only `mean_reversion` is implemented now)
 - [x] Track simulated cash balance, derived by replaying trades in order (starting cash − buys + sells)
 - [x] Size each trade using signal-strength-scaled quantity (larger z-score → larger position)
 - [x] Cap trade size to available cash on buys; skip/reduce sells if position doesn't hold enough shares

@@ -10,6 +10,7 @@ with recursive ranked_trades as (
 running_position as (
 
     -- base case: first trade per ticker
+    -- assumes shares_held starts at 0, enforced upstream in size_trades
     select
         ticker,
         trade_date,
