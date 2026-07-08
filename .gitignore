@@ -11,3 +11,5 @@ target/
 dbt_packages/
 logs/
 .user.yml
+snowflake_key.p8
+snowflake_key.pub
