@@ -182,6 +182,42 @@ Validation note:
 - [ ] (Stretch) Add `momentum` strategy as a second option to prove the pluggable design works
 - [ ] Clean repo structure, remove dead code/experiments before sharing
 
+### Phase 6 — Snowflake Migration
+
+- [ ] Set up Snowflake trial account (warehouse, database, schema, role)
+- [ ] Swap Postgres connection (psycopg2) for Snowflake Python connector
+- [ ] Update DDL for Snowflake types/syntax (`TIMESTAMP_NTZ`, no `SERIAL`, identity columns)
+- [ ] Replace `COPY`-from-file load with internal stage + `PUT` + `COPY INTO`
+- [ ] Swap `dbt-postgres` adapter for `dbt-snowflake`, update `profiles.yml`
+- [ ] Verify existing models (recursive CTEs, window functions) run unmodified on Snowflake; document any syntax deltas
+- [ ] Update Airflow connection from Postgres type to Snowflake type
+
+### Phase 7 — Snowflake Streams & Tasks (incremental processing)
+
+- [ ] Add a Stream on `raw_trades` to track new rows since last consumption
+- [ ] Add a Task to trigger downstream dbt processing when the Stream has data
+- [ ] Document how Stream/Task-driven triggering compares to Airflow's schedule-driven incremental runs — be ready to explain when you'd use which
+
+### Phase 8 — Fivetran / ELT tooling exposure
+
+- [ ] Decide approach (Alpaca isn't a native Fivetran connector):
+  - Option A: Build a custom connector via the Fivetran Connector SDK for Alpaca (closer to real hands-on Fivetran dev experience)
+  - Option B: Add a second, genuinely Fivetran-native source (e.g. Google Sheets, S3/CSV, a small Postgres source) alongside the existing Alpaca pipeline
+- [ ] Set up Fivetran free tier and land data into Snowflake's raw/bronze layer
+- [ ] Document how Fivetran's managed sync (schema drift handling, scheduling) differs from the custom Python ingestion already in the project
+
+### Phase 9 — Streamlit client-facing app
+
+- [ ] Small app reading from mart-layer tables (`portfolio_value`, `holdings_scd2`)
+- [ ] Portfolio value over time chart, current holdings table, data quality/test status indicator
+- [ ] Scope as a thin client-facing view, not a full app — revisit scope before building
+
+### Phase 10 — Data quality / QC framing
+
+- [ ] Reframe existing dbt tests (SCD2 no-overlap, not-null, relationships) explicitly as client-facing trust/QC rules, not just correctness checks
+- [ ] Add a lightweight data dictionary / lineage doc
+- [ ] Note current raw → staging → marts naming vs. Bronze/Silver/Gold (Medallion) terminology
+
 ## Repo structure
 
 ```
