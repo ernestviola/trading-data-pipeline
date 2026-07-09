@@ -2,7 +2,7 @@ version: 2
 
 sources:
   - name: raw
-    schema: public
+    schema: bronze
     tables:
       - name: raw_prices
         description: Landed OHLCV data from Alpaca

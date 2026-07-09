@@ -1,6 +1,6 @@
 select
   ticker,
-  date::date as trade_date,
+  "date"::date as trade_date,
   side,
   quantity,
   price,

@@ -1,6 +1,6 @@
 select
   symbol,
-  timestamp::date as price_date,
+  "timestamp"::date as price_date,
   open,
   high,
   low,
