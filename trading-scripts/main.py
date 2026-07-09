@@ -1,5 +1,5 @@
 from gather_historicals import gather_historicals
-from load_to_database import load_csv_to_postgres
+from load_to_database import load_csv_to_snowflake
 from datetime import datetime
 from strategies import STRATEGIES
 import os
@@ -8,9 +8,9 @@ import os
 def step_1(tickers, start, end):
     for ticker in tickers:
         csv_path = gather_historicals(ticker, start, end)
-        load_csv_to_postgres(
+        load_csv_to_snowflake(
             "raw_prices",
-            "on target.symbol = source.symbol AND target.timestamp = source.timestamp",
+            'on target.symbol = source.symbol AND target."timestamp" = source."timestamp"',
             csv_path,
         )
 
@@ -37,9 +37,9 @@ def step_2(
             shares_held,
             strategy_used=strategy,
         )
-        load_csv_to_postgres(
+        load_csv_to_snowflake(
             "raw_trades",
-            "on target.ticker = source.ticker AND target.date = source.date",
+            'on target.ticker = source.ticker AND target."date" = source."date"',
             csv_path,
         )
 

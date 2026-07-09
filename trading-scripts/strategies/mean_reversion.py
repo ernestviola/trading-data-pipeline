@@ -2,13 +2,12 @@ from pathlib import Path
 import pandas as pd
 import numpy as np
 from datetime import datetime
-import os
-from sqlalchemy import create_engine
+from utils.snowflake_connection import snowflake_connection
 from strategies.sizing import size_trades
 
 data_dir = Path(__file__).resolve().parent.parent.parent / "data"
 
-engine = create_engine(os.getenv("DATABASE_URL"))
+conn = snowflake_connection(role="transformer_role", schema="bronze")
 
 
 def mean_reversion(
@@ -27,10 +26,16 @@ def mean_reversion(
     )
 
     df = pd.read_sql(
-        "SELECT * FROM raw_prices WHERE symbol = %s ORDER BY timestamp;",
-        engine,
+        'SELECT * FROM raw_prices WHERE symbol = %s ORDER BY "timestamp";',
+        conn,
         params=(ticker,),
     )
+
+    # Snowflake folds unquoted DDL identifiers to uppercase, so columns come
+    # back as SYMBOL/TIMESTAMP/OPEN/CLOSE etc. Lowercase them to match the
+    # rest of this function, which was written against Postgres's lowercase
+    # fold behavior.
+    df.columns = df.columns.str.lower()
 
     df["rolling_mean"] = df["close"].rolling(window).mean()
     df["rolling_std"] = df["close"].rolling(window).std()

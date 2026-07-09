@@ -1,12 +1,17 @@
 from pathlib import Path
 from utils.snowflake_connection import snowflake_connection
 
-conn = snowflake_connection(role="loader_role")
+conn = snowflake_connection(role="loader_role", schema="bronze")
 cs = conn.cursor()
 
 
 def load_csv_to_snowflake(table_name, matching_sql, csv_path: Path):
     print("Processing: ", csv_path)
+
+    # Truncate staging first, not last — guarantees a clean slate before this
+    # run's load regardless of whether the previous run failed partway
+    # through (e.g. a MERGE error after COPY INTO already landed rows).
+    cs.execute(f"TRUNCATE TABLE {table_name}_staging;")
 
     # Upload local CSV into a per-table folder on the shared stage.
     # Snowflake's PUT doesn't take a bind variable for the file path.
@@ -46,5 +51,3 @@ def load_csv_to_snowflake(table_name, matching_sql, csv_path: Path):
                 INSERT ({", ".join(target)})
                 VALUES ({", ".join(source)});
             """)
-
-    cs.execute(f"TRUNCATE TABLE {table_name}_staging;")

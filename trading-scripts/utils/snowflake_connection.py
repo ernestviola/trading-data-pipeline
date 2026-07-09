@@ -5,7 +5,7 @@ from cryptography.hazmat.primitives import serialization
 import snowflake.connector
 
 
-def snowflake_connection(role: str):
+def snowflake_connection(role: str, schema: str = None):
     env_path = Path(__file__).resolve().parent.parent.parent / ".env"
     load_dotenv(dotenv_path=env_path)
 
@@ -31,6 +31,7 @@ def snowflake_connection(role: str):
         role=role,
         warehouse=os.getenv("SNOWFLAKE_WAREHOUSE"),
         database=os.getenv("SNOWFLAKE_DATABASE"),
+        schema=schema,
     )
 
     return conn

@@ -1,252 +1,264 @@
-# Simulated Trading Data Pipeline
+# Trading Strategy Backtest & Execution Platform
 
-A data engineering portfolio project simulating a mean-reversion trading strategy, built to demonstrate incremental loading, slowly changing dimensions, and orchestration patterns relevant to fintech data.
+A data engineering portfolio project centered on comparing algorithmic trading
+strategies against historical data, with a path toward live paper execution
+and, eventually, intelligent strategy switching. Built to demonstrate
+incremental loading, SCD Type 2 modeling, role-based access control, and
+orchestration patterns relevant to fintech data engineering.
 
-## Overview
+## Project vision — three layers
 
-This project pulls real historical stock price data, uses it to generate synthetic trades based on a configurable trading strategy, and models the resulting portfolio state changes over time — the kind of pattern found in real trading/position-tracking systems where historical state matters (audit, backtesting, reporting).
+This project is being built in three distinct layers. Each is a genuinely
+different engineering problem, not a bigger version of the last one.
 
-The core design goal: separate the **immutable event stream** (trades) from the **derived, mutable state** (holdings), and treat the trading strategy as a pluggable input rather than a fixed pipeline behavior.
+### Layer 1 — Backtesting / strategy comparison (current focus)
 
-## Getting Started
+Pull historical OHLCV data, run multiple pluggable trading strategies against
+it independently, and compare their simulated performance side by side —
+per ticker, and across tickers. This is the layer currently being built out
+on Snowflake/dbt/Airflow.
 
-1. Make sure you have a Postgres instance running (Docker is easiest — see below if you don't already have one).
-2. Copy `.exampleenv` to `.env` and fill in all required values (see below).
-3. Create the database and load the schema:
-   ```bash
-   docker exec -it <container_name> psql -U <user> -d <default_db> -c "CREATE DATABASE trading_pipeline;"
-   docker exec -i <container_name> psql -U <user> -d trading_pipeline < sql/001_setup_raw_prices.sql
-   ```
-4. Set up the Python environment:
-   ```bash
-   cd trading-scripts/
-   python3 -m venv .venv
-   source .venv/bin/activate
-   pip install -r requirements.txt
-   ```
-5. Create an [Alpaca account](https://alpaca.markets/) and generate API keys (paper trading is sufficient — no funding needed, this project only pulls historical market data).
-6. Run the pipeline:
-   ```bash
-   python main.py
-   ```
+Key design choice: each `(strategy, ticker)` pair is an **independent
+simulated portfolio** — its own starting cash, its own position history. This
+is what makes "mean_reversion vs. momentum on AAPL" or "best strategy across
+all tickers" an apples-to-apples comparison, and it's why `cash_position` and
+`holdings_scd2` are partitioned by `(strategy_used, ticker)` rather than
+tracking one global portfolio.
 
-### Don't have Postgres running yet?
+### Layer 2 — Live paper execution (not started)
 
-A minimal `docker-compose.yml` works fine:
+Once a strategy is validated in backtesting, submit its signals as real
+orders to Alpaca's paper trading API rather than simulating trades in Python.
+Key differences from Layer 1, noted here so they aren't lost:
 
-```yaml
-services:
-  postgres:
-    image: postgres:16
-    container_name: trading-postgres
-    environment:
-      - POSTGRES_USER=trading
-      - POSTGRES_PASSWORD=trading
-      - POSTGRES_DB=trading_pipeline
-    ports:
-      - '127.0.0.1:5432:5432'
-    volumes:
-      - './volume:/var/lib/postgresql/data'
-```
+- Alpaca's paper account enforces buying power itself — no need to replicate
+  `sizing.py`'s affordability logic as a synchronous ledger/lock the way a
+  real live-money OMS would need. The broker is the ledger.
+- New Bronze sources: `raw_orders` (submitted) and `raw_fills`/`raw_positions`
+  (what Alpaca actually executed), pulled from Alpaca's API rather than
+  generated in Python.
+- `holdings_scd2`/`portfolio_value` shift from synthetic trade replay to
+  real fill events — same SCD2/recursive-CTE pattern, different source.
+- Asset scope is constrained by what Alpaca actually offers: **US equities
+  and crypto only**. No forex, no true commodities (commodity _exposure_ is
+  only available via ETF proxy, e.g. `GLD` for gold).
+- Cash becomes a **single shared pool across tickers** again (not partitioned
+  per strategy/ticker like backtesting) — this is a deliberate, later
+  divergence from Layer 1's design, not a contradiction of it. A "mixed
+  strategy" that switches between strategies mid-flight is just another
+  `strategy_used` value under this shared-cash model — no separate
+  architecture needed for it.
 
-Volume-mounted, so data persists across `docker compose down`/`up` with no extra config needed.
+### Layer 3 — Regime switching / intelligent strategy allocation (not started, hardest)
 
-### Required `.env` values
+A meta-strategy that decides _which_ underlying strategy to run based on
+market conditions, to maximize profit. This is an open-ended quant research
+problem (regime detection / strategy allocation), not a small feature — to
+be scoped seriously once Layers 1 and 2 exist and there's real comparative
+performance data to make switching decisions from.
 
-`.exampleenv` documents these — copy it to `.env` (gitignored) and fill in:
-
-```
-ALPACA_API_KEY=
-ALPACA_API_SECRET=
-
-DATABASE_URL=postgresql://trading:trading@localhost:5432/trading_pipeline
-```
-
-## Architecture
+## Architecture (Layer 1 — current)
 
 ```
 Alpaca API (historical OHLCV)
         │
         ▼
-  raw_prices (landed once, append-only)
+  Bronze (Snowflake, loader_role)
+  raw_prices, raw_trades — landed via PUT + COPY INTO + staging/MERGE dedup
         │
         ▼
-  Trade generator (mean-reversion logic)
+  Silver (Snowflake, transformer_role — dbt)
+  stg_prices, stg_trades → int_portfolio_cash, int_position_cost_basis
+  (recursive CTEs, partitioned by strategy_used + ticker)
         │
         ▼
-  raw_trades (append-only fact — trade events)
+  Gold (Snowflake, transformer_role — dbt)
+  holdings_scd2, cash_position, portfolio_value (incremental),
+  strategy_performance_summary (view)
         │
         ▼
-     dbt models
-   staging → intermediate → marts
-        │
-        ▼
-  holdings_scd2 (position/cost-basis history)
-  portfolio_value (daily fact)
-        │
-        ▼
-   Airflow DAG orchestrates the above,
-   with retries + incremental logic
+   Airflow DAG orchestrates ingestion + dbt runs,
+   with retries + dynamic per-ticker task mapping
 ```
 
-**Local dev stack**, distinct from the pipeline architecture above:
+**Role-based access control:**
 
-- **Postgres** runs locally in Docker (`docker-compose.yml`) — keeps the project runnable by anyone cloning the repo, no cloud account or trial license required.
-- Objects live in the `trading_pipeline` database (see `sql/001_setup_raw_prices.sql`), created explicitly rather than reused from another local project's database — keeps the schema intentional and matches how dbt will reference sources later.
+- `loader_role` — write access to Bronze only. Used by Python ingestion.
+- `transformer_role` — read-only on Bronze, read/write Silver + Gold. Used by dbt.
+- `SYSADMIN` — read access across all three schemas, for manual browsing
+  without switching roles. `ACCOUNTADMIN` is left untouched, reserved for
+  account-level operations.
 
-## Key design decisions
+## Key design decisions (Layer 1)
 
-- **Source data pulled once, not on every run.** Alpaca free tier has no daily cap, but there's no reason to re-hit the API repeatedly for static historical data — it's landed once into a raw table and treated as the source of truth downstream.
-- **Trades are append-only.** Each generated trade is an immutable event. No updates, no deletes — this is the fact stream.
-- **Trade sizing scales with signal strength, not fixed.** Each trade's quantity is derived from how far the price deviates from the rolling mean, capped by available cash/position:
+- **Strategy comparison requires independent portfolios, not one shared
+  ledger.** `cash_position` and `holdings_scd2` are partitioned by
+  `(strategy_used, ticker)` — each combination replays its own trades against
+  its own $10,000 starting cash. This also sidesteps a real bug we found:
+  a single shared cash pool across tickers has no natural way to arbitrate
+  which ticker's buy "wins" when two tickers compete for the same cash in
+  the same run — a live-execution problem this project intentionally isn't
+  solving in the backtesting layer.
+- **`strategy_performance_summary` is a view, not a table.** It's a cheap
+  `MAX(date)`-per-group read on top of already-computed `portfolio_value`
+  data — no incremental/materialization cost to justify storing it.
+  Comparison metric is **percent return** (`(ending_value - starting_cash) /
+starting_cash`), not raw dollar gain, so it's fair across strategies.
+- **Reserved words need explicit quoting in Snowflake, and it bites in more
+  places than DDL.** `"timestamp"` and `"date"` were quoted at table-creation
+  time, which means every later _reference_ to them — in dbt models, in
+  hand-written `MERGE` matching SQL, in ad hoc queries — must also be quoted
+  and case-matched, or Snowflake's uppercase-folding of unquoted identifiers
+  will silently look for a different (nonexistent) column.
+- **`COPY INTO` + staging + `MERGE` needs staging truncated at the _start_
+  of a load, not the end.** A failed `MERGE` (e.g. the reserved-word bug
+  above) used to leave staging un-truncated, so the next run's `COPY INTO`
+  appended on top of leftover rows — silently creating duplicate rows in the
+  target table once a run finally succeeded. Fixed by truncating staging as
+  the first step of `load_csv_to_snowflake()`, independent of how the
+  previous run ended.
+- **Dynamic per-ticker Airflow task mapping is safe for computation, not for
+  shared-resource writes.** `compute_trades` can be `.expand()`-ed per ticker
+  (each instance reads Gold independently, no shared state). `load_trades`
+  cannot — all tickers currently share one `raw_trades_staging` table, so
+  parallel loaders would race on truncate/load. `load_trades` stays a single
+  sequential task that loops over each ticker's CSV path from
+  `compute_trades`'s XCom output. (`pull_prices`/price-loading has the same
+  latent risk if it's ever split the same way — not yet hit in practice,
+  revisit if it becomes a real task.)
+- **Snowflake connections are role-scoped, not schema-locked by default.**
+  `snowflake_connection(role, schema=None)` is a shared helper — `schema` is
+  only hardcoded at the call site for connections that structurally can only
+  ever target one schema (e.g. `loader_role` → always `bronze`).
+  `transformer_role` connections leave schema unset since dbt/analytics reads
+  span Silver and Gold.
 
-  ```
-  quantity = (base_position_size * min(abs(z_score) / z_threshold, max_multiplier)) / price
-  ```
+## Open design questions — momentum strategy (MACD), paused mid-design
 
-  - `starting_cash = $10,000` — arbitrary round number, easy to sanity-check by hand.
-  - `base_position_size = $500` — dollar-denominated (not a fixed share count) so trade size scales consistently across tickers at different price points.
-  - `z_threshold = 1.5` — the same threshold used to trigger a buy/sell signal; a trade right at the threshold gets exactly `base_position_size`.
-  - `max_multiplier = 3` — caps position size at 3x base ($1,500) for extreme z-scores, preventing one outlier signal from disproportionately sizing a single trade.
+Second strategy chosen: **MACD-based momentum** (rejected z-score — that's a
+mean-reversion concept, not a momentum one). Three forks were identified but
+not yet resolved:
 
-  After computing the desired quantity, buys are capped to `available_cash / price` and sells are capped to current shares held — trades are reduced (not skipped outright, unless the cap is 0) if the simulated portfolio can't fully support the desired size. Cash and position are tracked in-memory as trades are generated, replaying in chronological order per ticker — but neither is stored as a column in `raw_trades`, consistent with the append-only, immutable-event design. Position/cash state is meant to be re-derived downstream (in dbt) from the trade event stream itself, not trusted from a Python-side precomputation.
+1. **Crossover event vs. threshold on histogram magnitude.** True MACD usage
+   is a crossover event (histogram flips sign — buy on negative→positive,
+   sell on positive→negative), which needs a `shift()`-based comparison to
+   the previous row's sign. This is structurally different from
+   `mean_reversion.py`'s current per-row-only threshold check. Alternative:
+   threshold the histogram's raw magnitude per-row (simpler, reuses the
+   existing conditional pattern, but not how MACD is conventionally used).
+   **Leaning toward true crossover detection** as the more defensible
+   approach — not yet implemented.
 
-- **Holdings use SCD Type 2.** Position quantity and average cost basis change as new trades arrive. Instead of overwriting the current state, each change closes out the prior row (`end_date`, `is_current = false`) and inserts a new one — preserving full history and enabling point-in-time queries ("what did the portfolio look like on date X").
-- **Strategy is a parameter, not a branch.** The trade generator takes a `strategy` argument (starting with `mean_reversion`, with `momentum` supported later) and stamps each trade with `strategy_used`. Downstream models don't care which strategy produced a trade — this keeps the modeling/orchestration layer decoupled from trading logic, so adding a new strategy later requires no pipeline changes.
-- **Airflow orchestrates meaningfully, not trivially.** The DAG separates ingestion from transformation as distinct tasks, includes retry/failure handling, and drives incremental dbt runs rather than full-refreshing every time.
-- **Load deduplication uses a staging table + `MERGE`.** CSVs land in a staging table via `COPY`, then a `MERGE INTO` the target table (matched on natural keys like symbol/timestamp for prices, or ticker/date for trades) inserts only genuinely new rows. This catches overlapping-date-range files that a simple "have I loaded this exact file before" check wouldn't — which caused duplicate rows in practice during early development.
-- **Ingestion loads by explicit column list, not implicit header matching.** Postgres's `COPY ... HEADER true` verifies a header row exists but loads positionally rather than matching by column name — unlike Snowflake's `MATCH_BY_COLUMN_NAME`, there's no built-in reordering safety net here if Alpaca's CSV column order ever drifts, so this is a known tradeoff of the current implementation.
+2. **Scale mismatch between MACD histogram and existing threshold logic.**
+   `z_score` is unitless (standardized); MACD's histogram is in raw price
+   units (a difference of EMAs of price), so a fixed `z_threshold`-style
+   value doesn't transfer — $1.50 means something different for a $10 stock
+   vs. a $500 stock. Open question: normalize the histogram (e.g. as a
+   percentage of price) or accept per-ticker threshold tuning.
+
+3. **Strategy function signature needs to generalize.** `STRATEGIES` registry
+   and `step_2()` currently call every strategy with the same fixed
+   parameters (`window, starting_cash, base_position_size, z_threshold,
+max_multiplier, shares_held`). MACD needs different inputs entirely
+   (`fast_period=12, slow_period=26, signal_period=9`, plus whatever
+   threshold #2 lands on). This will likely require `**kwargs` or a
+   per-strategy config dict rather than a fixed positional signature.
+
+Related refactor this will force regardless of how the forks resolve:
+**`sizing.py` currently hardcodes `row.z_score`** in its strength
+calculation. Since MACD won't produce a z-score, `sizing.py` needs to
+generalize to consume a neutral `signal_strength` column directly (computed
+per-strategy upstream) rather than deriving `abs(z_score)` itself.
 
 ## Todo
 
-### Phase 1 — Setup & raw data
+### Phase 1–5 — Setup, trade generation, dbt modeling, orchestration, polish
 
-- [x] Setup local Postgres for development
-- [x] Create Alpaca account, get API key
-- [x] Pick a small set of tickers (5–10) to keep the project scoped _(currently just `AAPL` in `main.py`)_
-- [x] Pull historical daily OHLCV for chosen tickers, land in `raw_prices` (Postgres)
-- [x] Confirm schema: symbol, timestamp, open, high, low, close, volume, trade_count, vwap
-
-### Phase 2 — Trade generation
-
-- [x] Write script to compute rolling mean + stddev per ticker
-- [x] Implement mean-reversion signal (buy below threshold, sell above threshold)
-- [x] Generate `raw_trades` output with `strategy_used`, ticker, date, side, quantity, price
-- [x] Load `raw_trades` into Postgres
-
-### Phase 3 — dbt modeling
-
-- [x] Set up dbt project (`dbt-postgres` adapter), connect to Postgres
-- [x] Define sources for `raw_prices` and `raw_trades`
-- [x] Staging models: `stg_prices`, `stg_trades` (clean/rename/cast)
-- [x] Intermediate model: compute running position/cost-basis changes from trades
-- [x] Marts: `holdings_scd2` (SCD Type 2 dimension)
-- [x] Marts: `portfolio_value` (daily fact — position × price)
-- [x] Add generic tests (not null, unique, relationships) on key models
-- [x] Add at least one custom test (e.g. no overlapping SCD2 date ranges)
-- [x] Implement one model as incremental (merge strategy, not full refresh)
-
-### Phase 4 — Orchestration
-
-- [ ] Set up Airflow (local/Docker)
-- [ ] DAG task 1: ingest/generate new trades
-- [ ] DAG task 2: run dbt (staging → marts)
-- [ ] Add retry/failure handling (not just Airflow defaults)
-- [ ] Add a sensor or dependency check (e.g. don't run dbt until new trade data lands)
-- [ ] Confirm DAG supports incremental runs, not full reprocessing each time
-
-### Phase 4.5 — Revisit before polish
-
-From Phase 2 (trade sizing realism):
-
-- [x] Parameterize `strategy` argument (even if only `mean_reversion` is implemented now)
-- [x] Track simulated cash balance, derived by replaying trades in order (starting cash − buys + sells)
-- [x] Size each trade using signal-strength-scaled quantity (larger z-score → larger position)
-- [x] Cap trade size to available cash on buys; skip/reduce sells if position doesn't hold enough shares
-- [x] Document the sizing formula and its parameters in the README
-
-From Phase 3 (source freshness — deferred since raw data isn't pulled on a schedule):
-
-- [ ] Revisit source freshness checks IF ingestion becomes periodic rather than one-time
-- [ ] Until then, replace with a simpler row-count-based source test
-
-Validation note:
-
-- [ ] Once Phase 4.5 sizing changes land, re-validate `holdings_scd2` output values — the row-versioning mechanism built in Phase 3 doesn't need to change, but the quantity/cost-basis numbers running through it will
-
-### Phase 5 — Polish
-
-- [ ] Write README section explaining _why_, not just what (this doc is the start)
-- [ ] dbt docs generated and reviewed
-- [ ] Sanity-check SCD2 output with a manual point-in-time query
-- [ ] (Stretch) Add `momentum` strategy as a second option to prove the pluggable design works
-- [ ] Clean repo structure, remove dead code/experiments before sharing
+_(Complete on Postgres — see git history for detail. Superseded by Phase 6
+migration below.)_
 
 ### Phase 6 — Snowflake Migration
 
-- [ ] Set up Snowflake trial account (warehouse, database, schema, role)
-- [ ] Swap Postgres connection (psycopg2) for Snowflake Python connector
-- [ ] Update DDL for Snowflake types/syntax (`TIMESTAMP_NTZ`, no `SERIAL`, identity columns)
-- [ ] Replace `COPY`-from-file load with internal stage + `PUT` + `COPY INTO`
-- [ ] Swap `dbt-postgres` adapter for `dbt-snowflake`, update `profiles.yml`
-- [ ] Verify existing models (recursive CTEs, window functions) run unmodified on Snowflake; document any syntax deltas
+- [x] Set up Snowflake trial account (warehouse, database, schema, role)
+- [x] Bronze/Silver/Gold schemas, `loader_role`/`transformer_role` with
+      scoped grants, `SYSADMIN` read access for manual browsing
+- [x] Key-pair auth (`snowflake_connection.py`), retired password auth
+- [x] Swap Postgres connection (psycopg2) for Snowflake Python connector
+      (`PUT` + `COPY INTO`, staging + `MERGE` dedup pattern preserved)
+- [x] Update DDL for Snowflake types/syntax (`TIMESTAMP_NTZ`, no `SERIAL`)
+- [x] Swap `dbt-postgres` adapter for `dbt-snowflake`, update `profiles.yml`
+      (key-pair auth, `transformer_role`, custom `generate_schema_name` macro
+      for clean Bronze/Silver/Gold schema names)
+- [x] Verify existing models (recursive CTEs, window functions) run
+      unmodified on Snowflake — confirmed, only syntax delta was reserved
+      word quoting (`"timestamp"`, `"date"`), not the CTE/window logic itself
+- [x] Repartition `cash_position`/`holdings_scd2`/`portfolio_value` by
+      `(strategy_used, ticker)` for independent strategy comparison
+- [x] Add `strategy_performance_summary` view (percent-return leaderboard)
+- [x] Harden `load_csv_to_snowflake()` against partial-failure duplicate rows
 - [ ] Update Airflow connection from Postgres type to Snowflake type
+- [ ] Split `generate_trades` into `compute_trades` (dynamic per-ticker
+      mapping, `transformer_role`) + `load_trades` (single sequential task,
+      `loader_role`) — design finalized, not yet implemented in the DAG
+
+### Phase 6.5 — Second strategy (MACD momentum)
+
+- [ ] Resolve the three open forks above (crossover vs. threshold, scale
+      normalization, strategy signature generalization)
+- [ ] Generalize `sizing.py` to consume `signal_strength` directly instead
+      of hardcoded `z_score`
+- [ ] Implement `momentum.py`, register in `STRATEGIES`
+- [ ] Run both strategies against AAPL, confirm independent cash/holdings
+      trajectories via `(strategy_used, ticker)` partitioning
+- [ ] Sanity-check `strategy_performance_summary` leaderboard output
 
 ### Phase 7 — Snowflake Streams & Tasks (incremental processing)
 
 - [ ] Add a Stream on `raw_trades` to track new rows since last consumption
 - [ ] Add a Task to trigger downstream dbt processing when the Stream has data
-- [ ] Document how Stream/Task-driven triggering compares to Airflow's schedule-driven incremental runs — be ready to explain when you'd use which
+- [ ] Document how Stream/Task-driven triggering compares to Airflow's
+      schedule-driven incremental runs
 
 ### Phase 8 — Fivetran / ELT tooling exposure
 
-- [ ] Decide approach (Alpaca isn't a native Fivetran connector):
-  - Option A: Build a custom connector via the Fivetran Connector SDK for Alpaca (closer to real hands-on Fivetran dev experience)
-  - Option B: Add a second, genuinely Fivetran-native source (e.g. Google Sheets, S3/CSV, a small Postgres source) alongside the existing Alpaca pipeline
-- [ ] Set up Fivetran free tier and land data into Snowflake's raw/bronze layer
-- [ ] Document how Fivetran's managed sync (schema drift handling, scheduling) differs from the custom Python ingestion already in the project
+- [ ] Decide approach (Alpaca isn't a native Fivetran connector) — Option A:
+      custom Fivetran Connector SDK for Alpaca. Option B: genuinely
+      Fivetran-native second source. No decision yet.
+- [ ] Set up Fivetran free tier, land data into Bronze
+- [ ] Document how Fivetran's managed sync differs from custom Python ingestion
 
 ### Phase 9 — Streamlit client-facing app
 
-- [ ] Small app reading from mart-layer tables (`portfolio_value`, `holdings_scd2`)
-- [ ] Portfolio value over time chart, current holdings table, data quality/test status indicator
-- [ ] Scope as a thin client-facing view, not a full app — revisit scope before building
+- [ ] Comparison chart: all strategies against one chosen ticker
+- [ ] Leaderboard view: best strategy per ticker, across all tickers
+      (reads `strategy_performance_summary` directly)
+- [ ] Current holdings table, data quality/test status indicator
+- [ ] Scope as a thin client-facing view, not a full app
 
 ### Phase 10 — Data quality / QC framing
 
-- [ ] Reframe existing dbt tests (SCD2 no-overlap, not-null, relationships) explicitly as client-facing trust/QC rules, not just correctness checks
-- [ ] Add a lightweight data dictionary / lineage doc
-- [ ] Note current raw → staging → marts naming vs. Bronze/Silver/Gold (Medallion) terminology
+- [ ] Reframe existing dbt tests explicitly as client-facing trust/QC rules
+- [ ] Lightweight data dictionary / lineage doc
+- [ ] Document raw/staging/marts → Bronze/Silver/Gold naming mapping
 
-## Repo structure
+### Layer 2 — Live paper execution (scoping only, not started)
 
-```
-sql/                   DDL — database and table setup
-trading-scripts/
-  gather_historicals.py  Pulls historical OHLCV from Alpaca, writes to data/
-  load_to_database.py    COPY + staging-table MERGE into raw_prices / raw_trades
-  main.py                Entry point — loops tickers, gathers + loads
-  requirements.txt
-  strategies/
-   mean_reversion.py
-docker-compose.yml      Local Postgres (optional, if not already running one)
-.exampleenv             Template for required environment variables
-```
+- [ ] Alpaca order-submission client
+- [ ] `raw_orders`/`raw_fills`/`raw_positions` Bronze sources
+- [ ] Shared (non-partitioned) cash model for live execution, distinct from
+      backtesting's per-`(strategy, ticker)` partitioning
+- [ ] Next-day execution scheduling (signal computed after close, order fills
+      at next market open)
+
+### Layer 3 — Regime switching (scoping only, not started)
+
+- [ ] Not yet scoped — depends on having real comparative performance data
+      from Layers 1 and 2 first
 
 ## Stack
 
-- **Source**: Alpaca API (historical daily OHLCV, US equities)
-- **Warehouse**: Postgres (local, via Docker)
-- **Transformation**: dbt (`dbt-postgres`)
-- **Orchestration**: Airflow
-- **Local dev tools**: Docker Compose, `psql` (via `docker exec`), DBeaver (optional, for browsing/querying visually)
-
-## Note
-
-Airflow runs earlier versions of
-pandas
-numpy
-psycopg2-binary
-python-dotenv
-
-We may swap the trading-scripts versions down to match constraints
+- **Source**: Alpaca API (historical daily OHLCV, US equities + crypto)
+- **Warehouse**: Snowflake (Bronze/Silver/Gold, role-based access control)
+- **Transformation**: dbt (`dbt-snowflake`)
+- **Orchestration**: Airflow (Docker Compose, LocalExecutor)
+- **Planned**: Streamlit (client-facing dashboard), Fivetran (ELT exposure)
