@@ -1,9 +1,10 @@
 {{ config(
-  materialized='table',
-  unique_key=['ticker','price_date']
+  materialized='incremental',
+  unique_key=['strategy_used','ticker','price_date']
 ) }}
 
 select
+    h.strategy_used,
     p.symbol as ticker,
     p.price_date,
     p.close as price,
@@ -19,7 +20,7 @@ join {{ ref('holdings_scd2') }} h
     and (p.price_date < h.end_date or h.end_date is null)
 
 {% if is_incremental() %}
-where p.price_date > (select max(price_date) from {{this}})
+where p.price_date > (select max(price_date) from {{ this }})
 {% endif %}
 
-order by p.symbol, p.price_date
+order by h.strategy_used, p.symbol, p.price_date

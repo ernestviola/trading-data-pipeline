@@ -1,26 +1,38 @@
 from pathlib import Path
-from utils.postgres_connection import postgres_connection
+from utils.snowflake_connection import snowflake_connection
 
-conn = postgres_connection()
+conn = snowflake_connection(role="loader_role")
 cs = conn.cursor()
 
 
-def load_csv_to_postgres(table_name, matching_sql, csv_path: Path):
+def load_csv_to_snowflake(table_name, matching_sql, csv_path: Path):
     print("Processing: ", csv_path)
-    with open(csv_path, "r") as f:
-        cs.copy_expert(
-            f"COPY {table_name}_staging FROM STDIN WITH (FORMAT csv, HEADER true)",
-            f,
-        )
 
+    # Upload local CSV into a per-table folder on the shared stage.
+    # Snowflake's PUT doesn't take a bind variable for the file path.
+    stage_path = f"@bronze_load_stage/{table_name}"
+    cs.execute(f"PUT file://{csv_path.resolve()} {stage_path}")
+
+    # Load from stage into the staging table. No FORCE — rely on Snowflake's
+    # built-in load history (file name + size) to skip files already loaded.
+    # PURGE removes the staged file after a successful load.
+    cs.execute(f"""
+        COPY INTO {table_name}_staging
+        FROM {stage_path}/{csv_path.name}
+        FILE_FORMAT = (FORMAT_NAME = csv_with_header)
+        PURGE = TRUE
+        """)
+
+    # Snowflake folds unquoted identifiers to uppercase, unlike Postgres
+    # (which lowercases them) — match case-insensitively either way.
     cs.execute(
         """
         SELECT column_name
         FROM information_schema.columns
-        WHERE table_name = %s
+        WHERE UPPER(table_name) = UPPER(%s)
         ORDER BY ordinal_position
         """,
-        (table_name.lower(),),
+        (table_name,),
     )
     column_names = cs.fetchall()
     target = ['"' + row[0] + '"' for row in column_names]
@@ -34,7 +46,5 @@ def load_csv_to_postgres(table_name, matching_sql, csv_path: Path):
                 INSERT ({", ".join(target)})
                 VALUES ({", ".join(source)});
             """)
-
-    conn.commit()
 
     cs.execute(f"TRUNCATE TABLE {table_name}_staging;")

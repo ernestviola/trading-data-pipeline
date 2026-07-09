@@ -3,14 +3,19 @@
 with recursive ranked_trades as (
     select
         *,
-        row_number() over (order by trade_date asc, signal_strength desc) as rn
+        row_number() over (
+            partition by strategy_used, ticker
+            order by trade_date asc, signal_strength desc
+        ) as rn
     from {{ ref('stg_trades') }}
 ),
 
 running_cash as (
 
-    -- base case: first trade across the whole portfolio
+    -- base case: first trade per (strategy_used, ticker) — each strategy/ticker
+    -- combination gets its own independent starting cash
     select
+        strategy_used,
         ticker,
         trade_date,
         side,
@@ -26,8 +31,10 @@ running_cash as (
 
     union all
 
-    -- recursive case: build off the previous row's running cash
+    -- recursive case: build off the previous row's running cash,
+    -- staying within the same strategy_used + ticker partition
     select
+        rt.strategy_used,
         rt.ticker,
         rt.trade_date,
         rt.side,
@@ -40,10 +47,13 @@ running_cash as (
         end as cash_after
     from ranked_trades rt
     join running_cash rc
-        on rt.rn = rc.rn + 1
+        on rt.strategy_used = rc.strategy_used
+        and rt.ticker = rc.ticker
+        and rt.rn = rc.rn + 1
 )
 
 select
+    strategy_used,
     ticker,
     trade_date,
     side,
@@ -52,4 +62,4 @@ select
     cash_after,
     rn
 from running_cash
-order by rn
+order by strategy_used, ticker, rn
