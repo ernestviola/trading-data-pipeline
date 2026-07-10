@@ -1,8 +1,19 @@
 import os
+import warnings
 from pathlib import Path
 from dotenv import load_dotenv
 from cryptography.hazmat.primitives import serialization
 import snowflake.connector
+
+# pandas' read_sql only tests against SQLAlchemy engines/connections or
+# sqlite3 DBAPI2 connections, so it warns on any other DBAPI2 connection -
+# including Snowflake's, which works fine with read_sql in practice. Scoped
+# to this specific message so other, possibly-real, warnings still surface.
+warnings.filterwarnings(
+    "ignore",
+    message="pandas only supports SQLAlchemy connectable",
+    category=UserWarning,
+)
 
 
 def snowflake_connection(role: str, schema: str = None):

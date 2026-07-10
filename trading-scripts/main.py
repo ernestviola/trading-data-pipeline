@@ -2,6 +2,7 @@ from gather_historicals import gather_historicals
 from load_to_database import load_csv_to_snowflake
 from datetime import datetime
 from strategies import STRATEGIES
+from strategies.configs import MeanReversionConfig, MACDConfig
 import os
 
 
@@ -18,29 +19,29 @@ def step_1(tickers, start, end):
 def step_2(
     tickers,
     strategy,
-    window,
     starting_cash,
     base_position_size,
-    z_threshold,
     max_multiplier,
     shares_held,
+    config,
 ):
-    strategy_fn = STRATEGIES[strategy]
+    strategy_fn, _ = STRATEGIES[strategy]
     for ticker in tickers:
         csv_path = strategy_fn(
             ticker,
-            window,
             starting_cash,
             base_position_size,
-            z_threshold,
             max_multiplier,
             shares_held,
             strategy_used=strategy,
+            config=config,
         )
         load_csv_to_snowflake(
             "raw_trades",
             'on target.ticker = source.ticker AND target."date" = source."date"',
             csv_path,
+            delete_where_sql="WHERE strategy_used = %s AND ticker = %s",
+            delete_params=(strategy, ticker),
         )
 
 
@@ -50,22 +51,30 @@ def main():
     tickers = ["AAPL"]
     start = datetime(2023, 1, 1)
     end = datetime.now()
-    window = 20
     base_position_size = 500
-    z_threshold = 1.5
     max_multiplier = 3
     shares_held = 0
 
     step_1(tickers, start, end)
+
     step_2(
         tickers,
         "mean_reversion",
-        window,
         STARTING_CASH,
         base_position_size,
-        z_threshold,
         max_multiplier,
         shares_held,
+        config=MeanReversionConfig(window=20, strength_threshold=1.5),
+    )
+
+    step_2(
+        tickers,
+        "macd_momentum",
+        STARTING_CASH,
+        base_position_size,
+        max_multiplier,
+        shares_held,
+        config=MACDConfig(),
     )
 
 

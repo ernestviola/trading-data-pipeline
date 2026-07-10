@@ -110,65 +110,153 @@ starting_cash`), not raw dollar gain, so it's fair across strategies.
   hand-written `MERGE` matching SQL, in ad hoc queries — must also be quoted
   and case-matched, or Snowflake's uppercase-folding of unquoted identifiers
   will silently look for a different (nonexistent) column.
-- **`COPY INTO` + staging + `MERGE` needs staging truncated at the _start_
+- **`COPY INTO` + staging + `MERGE` needs staging cleared at the _start_
   of a load, not the end.** A failed `MERGE` (e.g. the reserved-word bug
   above) used to leave staging un-truncated, so the next run's `COPY INTO`
   appended on top of leftover rows — silently creating duplicate rows in the
-  target table once a run finally succeeded. Fixed by truncating staging as
+  target table once a run finally succeeded. Fixed by clearing staging as
   the first step of `load_csv_to_snowflake()`, independent of how the
   previous run ended.
-- **Dynamic per-ticker Airflow task mapping is safe for computation, not for
-  shared-resource writes.** `compute_trades` can be `.expand()`-ed per ticker
-  (each instance reads Gold independently, no shared state). `load_trades`
-  cannot — all tickers currently share one `raw_trades_staging` table, so
-  parallel loaders would race on truncate/load. `load_trades` stays a single
-  sequential task that loops over each ticker's CSV path from
-  `compute_trades`'s XCom output. (`pull_prices`/price-loading has the same
-  latent risk if it's ever split the same way — not yet hit in practice,
-  revisit if it becomes a real task.)
+- **Scoped `DELETE` instead of blanket `TRUNCATE`, for callers sharing a
+  staging table.** `main.py` now runs `mean_reversion` and `macd_momentum`
+  back-to-back same-day, both writing through the same `raw_trades_staging`
+  table — a full `TRUNCATE` would wipe one strategy's just-loaded,
+  not-yet-merged rows out from under the other. `load_csv_to_snowflake()`
+  takes an optional `delete_where_sql`/`delete_params` pair; `raw_trades`
+  loads pass `WHERE strategy_used = %s AND ticker = %s` so each load only
+  clears its own scope. `raw_prices` still defaults to a full `TRUNCATE`
+  since nothing shares its staging table yet.
+  **Concurrent load retries — still open.** Scoped `DELETE` makes concurrent
+  calls _correctness_-safe (no cross-scope data loss) but not necessarily
+  _executable_ concurrently: Snowflake's concurrent-DML conflict detection
+  works at the micro-partition level, not exact row level, so two truly
+  concurrent `DELETE`+`COPY INTO`+`MERGE` transactions against a small
+  staging table can still collide and one gets rejected, even though their
+  `WHERE` predicates don't overlap. Real parallel loads would need
+  retry-on-conflict handling wrapped around `load_csv_to_snowflake()` — not
+  yet implemented. Today this doesn't block anything: `main.py`'s two
+  `step_2()` calls run sequentially in one process, not concurrently.
+- **Dynamic per-ticker Airflow task mapping is safe for computation, not yet
+  for shared-resource writes.** `compute_trades` can be `.expand()`-ed per
+  ticker (each instance reads Gold independently, no shared state).
+  `load_trades` still can't safely be parallelized despite the scoped-
+  `DELETE` fix above, for the same concurrent-DML reason — `load_trades`
+  stays a single sequential task that loops over each ticker's CSV path from
+  `compute_trades`'s XCom output until retry-on-conflict logic exists.
+  (`pull_prices`/price-loading has the same latent risk if it's ever split
+  the same way — not yet hit in practice, revisit if it becomes a real
+  task.)
 - **Snowflake connections are role-scoped, not schema-locked by default.**
   `snowflake_connection(role, schema=None)` is a shared helper — `schema` is
   only hardcoded at the call site for connections that structurally can only
   ever target one schema (e.g. `loader_role` → always `bronze`).
   `transformer_role` connections leave schema unset since dbt/analytics reads
   span Silver and Gold.
+- **`mean_reversion` has no position-state awareness — known characteristic,
+  not a bug.** It re-evaluates the z_score threshold every row with no
+  memory of whether it's already flat, so during a sustained trend (e.g.
+  AAPL climbing ~259→315 over a real backtest window) it keeps re-firing the
+  same-direction signal well after it's already sold every share, producing
+  zero-quantity trade rows once inventory hits zero. `momentum`'s crossover
+  design (fork 1) doesn't have this failure mode by construction — a sign
+  flip only happens once. Left as-is deliberately rather than adding
+  position-awareness or filtering zero-quantity rows; worth surfacing if
+  strategy performance comparison ever needs to explain a divergence between
+  the two.
 
-## Open design questions — momentum strategy (MACD), paused mid-design
+## Design decisions — momentum strategy (MACD), resolved
 
 Second strategy chosen: **MACD-based momentum** (rejected z-score — that's a
-mean-reversion concept, not a momentum one). Three forks were identified but
-not yet resolved:
+mean-reversion concept, not a momentum one). Three forks were identified;
+all three are now resolved:
 
-1. **Crossover event vs. threshold on histogram magnitude.** True MACD usage
-   is a crossover event (histogram flips sign — buy on negative→positive,
-   sell on positive→negative), which needs a `shift()`-based comparison to
-   the previous row's sign. This is structurally different from
-   `mean_reversion.py`'s current per-row-only threshold check. Alternative:
-   threshold the histogram's raw magnitude per-row (simpler, reuses the
-   existing conditional pattern, but not how MACD is conventionally used).
-   **Leaning toward true crossover detection** as the more defensible
-   approach — not yet implemented.
+1. **Crossover event, not threshold-on-magnitude.** True MACD usage is a
+   crossover event (histogram flips sign — buy on negative→positive, sell on
+   positive→negative), via a `shift()`-based comparison to the previous
+   row's sign. This is structurally different from `mean_reversion.py`'s
+   current per-row-only threshold check, and is independent of fork 2 below
+   — a sign flip is unaffected by whether the histogram is normalized,
+   since normalizing divides by a positive value.
 
-2. **Scale mismatch between MACD histogram and existing threshold logic.**
-   `z_score` is unitless (standardized); MACD's histogram is in raw price
-   units (a difference of EMAs of price), so a fixed `z_threshold`-style
-   value doesn't transfer — $1.50 means something different for a $10 stock
-   vs. a $500 stock. Open question: normalize the histogram (e.g. as a
-   percentage of price) or accept per-ticker threshold tuning.
+2. **Normalize via PPO-style percentage, not raw price units.** `z_score` is
+   unitless; MACD's histogram is in raw price units (a difference of EMAs of
+   price), so a fixed threshold doesn't transfer across tickers at different
+   price levels. Resolved by normalizing the same way a real-world
+   Percentage Price Oscillator does: `(fast_EMA − slow_EMA) / slow_EMA *
+100`. The raw (non-normalized) histogram still drives the crossover
+   trigger per fork 1; the normalized value feeds `signal_strength` as
+   `abs(normalized_histogram)` — mirroring `abs(z_score)`'s role for
+   mean-reversion.
 
-3. **Strategy function signature needs to generalize.** `STRATEGIES` registry
-   and `step_2()` currently call every strategy with the same fixed
-   parameters (`window, starting_cash, base_position_size, z_threshold,
-max_multiplier, shares_held`). MACD needs different inputs entirely
-   (`fast_period=12, slow_period=26, signal_period=9`, plus whatever
-   threshold #2 lands on). This will likely require `**kwargs` or a
-   per-strategy config dict rather than a fixed positional signature.
+3. **Per-strategy typed config, not `**kwargs`or a plain dict.**`STRATEGIES`and`step_2()` used to call every strategy with the same fixed positional
+parameters (`window, starting_cash, base_position_size, z_threshold,
+   max_multiplier, shares_held`), which didn't fit MACD's entirely different
+inputs (`fast_period=12, slow_period=26, signal_period=9`). With a target
+of 100+ strategies, plain `\*\*kwargs`doesn't namespace (two strategies
+both wanting a`threshold`param collide) and doesn't validate (a typo in
+a dict key silently produces a wrong value instead of failing loudly).
+Implemented instead as`strategies/configs.py`: each strategy is paired
+with its own dataclass config in the registry —
+`STRATEGIES = {"mean_reversion": (mean_reversion, MeanReversionConfig),
+   "macd_momentum": (momentum, MACDConfig)}`— giving namespacing plus
+validation/autocomplete, and letting`step_2()`pass a strategy's config
+through untouched without knowing its shape. Both configs share the
+field name`strength_threshold`for their sizing-normalization role
+(mean-reversion's also doubles as its buy/sell trigger cutoff; MACD's
+trigger is the crossover event in fork 1, so its`strength_threshold`
+   only feeds sizing).
 
-Related refactor this will force regardless of how the forks resolve:
-**`sizing.py` currently hardcodes `row.z_score`** in its strength
-calculation. Since MACD won't produce a z-score, `sizing.py` needs to
-generalize to consume a neutral `signal_strength` column directly (computed
-per-strategy upstream) rather than deriving `abs(z_score)` itself.
+Related refactor this forces regardless: **`sizing.py` currently hardcodes
+`row.z_score`** in its strength calculation. Since MACD won't produce a
+z-score, `sizing.py` needs to generalize to consume a neutral
+`signal_strength` column directly (computed per-strategy upstream, per fork
+2 above) rather than deriving `abs(z_score)` itself.
+
+## Agent layer — scoping (paused, blocked on MACD/signal_strength work)
+
+Goal: a conversational "what and why" layer over the pipeline's data — not a
+replacement for Phase 9's Streamlit dashboard, but a chat panel embedded in
+it. Motivation is partly resume-driven (MCP/agent tool-calling is asked for
+directly in AI-engineering and forward-deployed-engineering postings), but
+the design is scoped for defensibility, not buzzword coverage.
+
+**Decisions made:**
+
+- **Tools must be strategy-agnostic from the start.** No tool or resource
+  gets named after a single strategy (e.g. `get_strategy_signal` takes
+  `strategy_used` as a parameter, not a hardcoded "mean-reversion"). This
+  mirrors the same principle behind `signal_strength` in the data layer —
+  the multi-strategy comparison is the actual differentiator for this
+  feature, not single-strategy Q&A. Practically, this means the agent layer
+  is **blocked on Phase 6.5** (MACD forks resolved, `sizing.py` generalized
+  to consume `signal_strength`): building tools against mean-reversion only
+  now means rebuilding them once MACD lands.
+- **No LangGraph, at least initially.** The example questions ("why did the
+  strategy exit AAPL," "how did performance change since the threshold
+  changed") are sequential multi-tool lookups with no branching and no need
+  to persist state across turns — a plain tool-calling loop (model sequences
+  its own calls) covers this. LangGraph's explicit graph structure earns its
+  place when control flow itself needs to branch, retry with backtracking,
+  or checkpoint a long-running task — not preemptively. Revisit only if a
+  real question surfaces that a simple loop can't handle.
+- **MCP over raw SQL access, transport kept minimal.** Tools are deliberately
+  scoped and read-only (no trade execution). Stdio transport is sufficient
+  for the stated clients (Claude Desktop, an in-process Streamlit chat
+  panel) — no FastAPI/HTTP layer unless a client requiring it shows up.
+- **Evals/tracing built alongside tool development, not bolted on at the
+  end.** A handful of question/expected-answer pairs and basic tracing from
+  day one matter more for defensibility than a fully-featured tool surface
+  with no evidence it's ever wrong — if time runs short, this is the part
+  that should survive, not get cut as "Phase 3."
+- **Streamlit integration is in-process, not another MCP round-trip.** The
+  MCP server is the single source of truth for tools; the tool-calling agent
+  consumes them and is embedded directly (Python import) as a chat panel in
+  the Phase 9 Streamlit app. Claude Desktop can independently connect to the
+  same MCP server as a second, separate demo.
+
+**Guardrails (what NOT to build):** no write access via MCP (read-only
+tools only), no fine-tuning, no LangGraph/multi-agent orchestration unless a
+concrete need for branching or persisted state actually shows up.
 
 ## Todo
 
@@ -203,14 +291,47 @@ migration below.)_
 
 ### Phase 6.5 — Second strategy (MACD momentum)
 
-- [ ] Resolve the three open forks above (crossover vs. threshold, scale
-      normalization, strategy signature generalization)
-- [ ] Generalize `sizing.py` to consume `signal_strength` directly instead
-      of hardcoded `z_score`
-- [ ] Implement `momentum.py`, register in `STRATEGIES`
-- [ ] Run both strategies against AAPL, confirm independent cash/holdings
-      trajectories via `(strategy_used, ticker)` partitioning
+- [x] Resolve the three design forks above (crossover detection, PPO-style
+      normalization, per-strategy typed config)
+- [x] Generalize `sizing.py` to consume `signal_strength` directly instead
+      of hardcoded `z_score` (`strength_threshold` param, reads
+      `row.signal_strength`)
+- [x] Define `MACDConfig`/`MeanReversionConfig` dataclasses
+      (`strategies/configs.py`) and update `STRATEGIES` registry to pair
+      each strategy function with its config class
+- [x] Implement `momentum.py`: crossover-based buy/sell (raw histogram sign
+      flip via `shift()`, no lookahead — decision uses yesterday's closed
+      histogram, executes at today's open) + `signal_strength` from the
+      PPO-style normalized histogram. Verified against synthetic price data:
+      crossovers fire as sparse events (not per-row), signal_strength is
+      non-negative and finite.
+- [x] Run both strategies against AAPL via `main.py`, confirm independent
+      cash/holdings trajectories via `(strategy_used, ticker)` partitioning
+      (needs live Snowflake credentials/environment — not runnable from
+      this session)
 - [ ] Sanity-check `strategy_performance_summary` leaderboard output
+- [ ] Calibrate `MACDConfig.strength_threshold` (currently a placeholder,
+      `0.5`) against real backtest output rather than a guess
+
+### Phase 6.7 — Agent layer (MCP tools + tool-calling loop)
+
+- [ ] Blocked on Phase 6.5 — tools must be strategy-parameterized from the
+      start (`strategy_used` as an argument, not hardcoded)
+- [ ] Scope MCP tool contracts: `get_holdings(strategy_used, ticker,
+as_of_date)`, `get_trade_history(strategy_used, symbol, start_date,
+end_date)`, `get_strategy_signal(strategy_used, symbol, date)`,
+      `get_performance_summary(strategy_used, start_date, end_date)`
+- [ ] Build MCP server (Python `mcp` SDK, stdio transport — no FastAPI/HTTP
+      layer unless a non-Claude-Desktop client actually requires it)
+- [ ] Verify tools work via `claude mcp add` in Claude Desktop
+- [ ] Plain tool-calling loop on top of the MCP tools (single agent loop,
+      model sequences its own tool calls) — no LangGraph graph unless a real
+      branching/stateful need shows up once built against real questions
+- [ ] Write 5-10 eval question/expected-answer pairs alongside tool
+      development, not deferred to a later phase
+- [ ] Basic tracing (LangSmith or Langfuse) wired in from the start
+- [ ] Embed the agent as a chat panel in the Phase 9 Streamlit app
+      (in-process, direct Python import — not another MCP round-trip)
 
 ### Phase 7 — Snowflake Streams & Tasks (incremental processing)
 
@@ -233,6 +354,8 @@ migration below.)_
 - [ ] Leaderboard view: best strategy per ticker, across all tickers
       (reads `strategy_performance_summary` directly)
 - [ ] Current holdings table, data quality/test status indicator
+- [ ] Chat panel embedding the Phase 6.7 agent (in-process) for "what and
+      why" questions about the displayed data
 - [ ] Scope as a thin client-facing view, not a full app
 
 ### Phase 10 — Data quality / QC framing
@@ -261,4 +384,5 @@ migration below.)_
 - **Warehouse**: Snowflake (Bronze/Silver/Gold, role-based access control)
 - **Transformation**: dbt (`dbt-snowflake`)
 - **Orchestration**: Airflow (Docker Compose, LocalExecutor)
-- **Planned**: Streamlit (client-facing dashboard), Fivetran (ELT exposure)
+- **Planned**: Streamlit (client-facing dashboard), Fivetran (ELT exposure),
+  MCP server + tool-calling agent (chat layer over pipeline data)

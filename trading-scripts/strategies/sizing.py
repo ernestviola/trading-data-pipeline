@@ -2,13 +2,17 @@ def size_trades(
     trades_df,
     cash_on_hand,
     base_position_size,
-    z_threshold,
+    strength_threshold,
     max_multiplier,
     shares_held,
 ):
     """
     trades_df must be sorted chronologically per ticker before calling this.
-    Expects columns: side ('buy'/'sell'), z_score, price.
+    Expects columns: side ('buy'/'sell'), signal_strength, price.
+    signal_strength is a strategy-agnostic, non-negative measure of signal
+    strength computed upstream by the calling strategy (e.g. abs(z_score)
+    for mean-reversion, abs(normalized MACD histogram) for momentum) — this
+    function doesn't know or care which strategy produced it.
     Adds: quantity, cash_after, shares_held_after.
     """
     quantities = []
@@ -16,13 +20,14 @@ def size_trades(
     shares_trace = []
 
     for row in trades_df.itertuples():
-        # abs value of z_score gives the strength of the signal and we instead use buy or sell to denote the direction
+        # signal_strength is already a strategy-agnostic magnitude computed
+        # upstream by the calling strategy
 
-        # we divide by z_threshold in order to normalize the strength say threshold was 2 then we don't want the multiplier to start at 2 we want it to start at 1
-
-        # dollar size is the amount we want to spend on this trade
+        # we divide by strength_threshold in order to normalize the strength
+        # say threshold was 2 then we don't want the multiplier to start at
+        # 2 we want it to start at 1
         dollar_size = base_position_size * min(
-            abs(row.z_score) / z_threshold, max_multiplier
+            row.signal_strength / strength_threshold, max_multiplier
         )
 
         # straight forward calc of the qty. Spend / price

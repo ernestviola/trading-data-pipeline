@@ -6,6 +6,7 @@ from airflow.operators.bash import BashOperator
 from gather_historicals import gather_historicals
 from load_to_database import load_csv_to_postgres
 from strategies import STRATEGIES
+from strategies.configs import MeanReversionConfig
 from utils.postgres_connection import postgres_connection
 
 default_args = {"retries": 3, "retry_delay": timedelta(minutes=5)}
@@ -46,7 +47,8 @@ def generate_trades(**context):
         )
         cash_on_hand = cs.fetchone()[0]
 
-        strategy_fn = STRATEGIES[STRATEGY]
+        strategy_fn, _ = STRATEGIES[STRATEGY]
+        config = MeanReversionConfig(window=WINDOW, strength_threshold=Z_THRESHOLD)
         for ticker in TICKERS:
             cs.execute(
                 """
@@ -61,13 +63,12 @@ def generate_trades(**context):
 
             csv_path = strategy_fn(
                 ticker,
-                WINDOW,
                 cash_on_hand,
                 BASE_POSITION_SIZE,
-                Z_THRESHOLD,
                 MAX_MULTIPLIER,
                 shares_held,
                 strategy_used=STRATEGY,
+                config=config,
             )
             load_csv_to_postgres(
                 "raw_trades",
