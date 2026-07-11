@@ -110,6 +110,41 @@ starting_cash`), not raw dollar gain, so it's fair across strategies.
   hand-written `MERGE` matching SQL, in ad hoc queries — must also be quoted
   and case-matched, or Snowflake's uppercase-folding of unquoted identifiers
   will silently look for a different (nonexistent) column.
+- **Recalibrating thresholds and rerunning `main.py` had no effect, because
+  `MERGE` never updates existing rows.** Same `WHEN NOT MATCHED THEN INSERT`
+  (no `UPDATE`) as the bug above, different symptom: once a row exists for a
+  `(ticker, strategy_used, date)`, changing the config and rerunning doesn't
+  touch it - it was computed under the old thresholds and just sits there.
+  For `macd_momentum` this was total (crossover dates are threshold-
+  independent, so the exact same dates come back "already matched" every
+  time - sizing changes had zero effect). For `mean_reversion` it was
+  partial (only genuinely new/removed trade dates reflected the new
+  config). Root cause: `main.py` recomputes each strategy's _entire_ trade
+  history from scratch every run, which means a config change needs
+  full-replace semantics for that `(strategy_used, ticker)` scope, not
+  incremental-append semantics. Fixed via new `delete_target_where_sql`/
+  `delete_target_params` on `load_csv_to_snowflake()` - clears matching
+  rows from the _target_ table (not just staging) before the `MERGE`,
+  scoped the same way as the staging delete. Defaults to `None` (original
+  append-only behavior) for callers where that's actually correct, e.g.
+  `raw_prices`' genuinely incremental daily loads - only `main.py`'s
+  `raw_trades` call opts in.
+- **`MERGE` match key must include every column that partitions the table,
+  not just what looks unique.** `raw_trades`'s `MERGE` matched on
+  `ticker + date` only — correct while `mean_reversion` was the only
+  strategy, since strategy_used was constant across every row. Once
+  `macd_momentum` shared the same table, any date where both strategies
+  traded the same ticker collided: `WHEN NOT MATCHED` saw an existing row
+  for that `ticker + date` (from whichever strategy loaded first) and
+  silently skipped the other strategy's row for that date. Surfaced as
+  `macd_momentum` showing negative `market_value` in
+  `strategy_performance_summary` — missing buy rows meant
+  `int_position_cost_basis`'s recursive `shares_held - quantity` (no floor
+  at zero) went negative. Fixed by adding `strategy_used` to the match key
+  in both `main.py` and the DAG. Since `MERGE` here only has
+  `WHEN NOT MATCHED THEN INSERT` (no `UPDATE`), no existing row was ever
+  corrupted — only some rows were never inserted — so re-running `main.py`
+  after the fix backfills what's missing with no manual cleanup needed.
 - **`COPY INTO` + staging + `MERGE` needs staging cleared at the _start_
   of a load, not the end.** A failed `MERGE` (e.g. the reserved-word bug
   above) used to leave staging un-truncated, so the next run's `COPY INTO`
@@ -212,7 +247,7 @@ z-score, `sizing.py` needs to generalize to consume a neutral
 `signal_strength` column directly (computed per-strategy upstream, per fork
 2 above) rather than deriving `abs(z_score)` itself.
 
-## Agent layer — scoping (paused, blocked on MACD/signal_strength work)
+## Agent layer — scoping (paused, sequenced after Phase 9 / Streamlit)
 
 Goal: a conversational "what and why" layer over the pipeline's data — not a
 replacement for Phase 9's Streamlit dashboard, but a chat panel embedded in
@@ -227,10 +262,13 @@ the design is scoped for defensibility, not buzzword coverage.
   `strategy_used` as a parameter, not a hardcoded "mean-reversion"). This
   mirrors the same principle behind `signal_strength` in the data layer —
   the multi-strategy comparison is the actual differentiator for this
-  feature, not single-strategy Q&A. Practically, this means the agent layer
-  is **blocked on Phase 6.5** (MACD forks resolved, `sizing.py` generalized
-  to consume `signal_strength`): building tools against mean-reversion only
-  now means rebuilding them once MACD lands.
+  feature, not single-strategy Q&A. This was originally the phase's only
+  blocker (**Phase 6.5**, now done). It's since moved to **after Phase 9**
+  too — a standalone agent layer with no Streamlit app to embed into is
+  speculative rather than a real integration, so it's sequenced as
+  Phase 9.5. The MCP server itself is still independently demoable via
+  Claude Desktop regardless of Streamlit; only the in-process chat-panel
+  embedding specifically needs Phase 9 done first.
 - **No LangGraph, at least initially.** The example questions ("why did the
   strategy exit AAPL," "how did performance change since the threshold
   changed") are sequential multi-tool lookups with no branching and no need
@@ -305,33 +343,29 @@ migration below.)_
       PPO-style normalized histogram. Verified against synthetic price data:
       crossovers fire as sparse events (not per-row), signal_strength is
       non-negative and finite.
-- [x] Run both strategies against AAPL via `main.py`, confirm independent
+- [x] Ran both strategies against AAPL via `main.py`, confirmed independent
       cash/holdings trajectories via `(strategy_used, ticker)` partitioning
-      (needs live Snowflake credentials/environment — not runnable from
-      this session)
-- [ ] Sanity-check `strategy_performance_summary` leaderboard output
-- [ ] Calibrate `MACDConfig.strength_threshold` (currently a placeholder,
-      `0.5`) against real backtest output rather than a guess
-
-### Phase 6.7 — Agent layer (MCP tools + tool-calling loop)
-
-- [ ] Blocked on Phase 6.5 — tools must be strategy-parameterized from the
-      start (`strategy_used` as an argument, not hardcoded)
-- [ ] Scope MCP tool contracts: `get_holdings(strategy_used, ticker,
-as_of_date)`, `get_trade_history(strategy_used, symbol, start_date,
-end_date)`, `get_strategy_signal(strategy_used, symbol, date)`,
-      `get_performance_summary(strategy_used, start_date, end_date)`
-- [ ] Build MCP server (Python `mcp` SDK, stdio transport — no FastAPI/HTTP
-      layer unless a non-Claude-Desktop client actually requires it)
-- [ ] Verify tools work via `claude mcp add` in Claude Desktop
-- [ ] Plain tool-calling loop on top of the MCP tools (single agent loop,
-      model sequences its own tool calls) — no LangGraph graph unless a real
-      branching/stateful need shows up once built against real questions
-- [ ] Write 5-10 eval question/expected-answer pairs alongside tool
-      development, not deferred to a later phase
-- [ ] Basic tracing (LangSmith or Langfuse) wired in from the start
-- [ ] Embed the agent as a chat panel in the Phase 9 Streamlit app
-      (in-process, direct Python import — not another MCP round-trip)
+- [x] Sanity-checked `strategy_performance_summary` leaderboard output —
+      caught and fixed the `MERGE` match-key bug (missing `strategy_used`)
+      and the MERGE-never-updates staleness bug along the way; final output
+      shows both strategies with plausible independent returns
+- [x] Split `strength_threshold` into `buy_strength_threshold`/
+      `sell_strength_threshold` (both configs, `sizing.py` picks by
+      `row.side`) - buy/sell sensitivity isn't necessarily symmetric.
+      Defaults unchanged (both sides equal to the old single value) so
+      behavior didn't shift until calibrated.
+- [x] Built `calibrate_thresholds.py`: grid-sweeps buy/sell thresholds per
+      strategy with an in-sample (pre-2025)/out-of-sample (2025+) date
+      split, each split simulated as its own independent portfolio (fresh
+      cash, shares_held=0) rather than slicing one continuous run - avoids
+      picking a threshold that just curve-fits the full window. Read-only
+      against raw_prices, never touches raw_trades/dbt. Verified against
+      synthetic regime-shifting price data before handoff; the overfitting
+      guard fired as intended (a combo that looked best in-sample lost
+      money out-of-sample).
+- [x] Ran `calibrate_thresholds.py` against real AAPL data; updated both
+      configs' defaults in `main.py` with the sweep + out-of-sample-checked
+      thresholds
 
 ### Phase 7 — Snowflake Streams & Tasks (incremental processing)
 
@@ -354,9 +388,37 @@ end_date)`, `get_strategy_signal(strategy_used, symbol, date)`,
 - [ ] Leaderboard view: best strategy per ticker, across all tickers
       (reads `strategy_performance_summary` directly)
 - [ ] Current holdings table, data quality/test status indicator
-- [ ] Chat panel embedding the Phase 6.7 agent (in-process) for "what and
-      why" questions about the displayed data
 - [ ] Scope as a thin client-facing view, not a full app
+
+### Phase 9.5 — Agent layer (MCP tools + tool-calling loop)
+
+Moved after Phase 9, not before it - it doesn't make sense as a standalone
+phase with nothing to integrate into yet. The chat panel's whole point is
+to embed _into_ the Streamlit app for "what and why" questions about what's
+on screen, so Streamlit needs to exist first for that integration point to
+be real rather than speculative. The MCP server itself is still
+independently demoable via Claude Desktop regardless of Streamlit, but the
+in-process embedding step specifically needs Phase 9 done.
+
+- [ ] Blocked on Phase 6.5 (already done) and Phase 9 — tools must be
+      strategy-parameterized from the start (`strategy_used` as an
+      argument, not hardcoded), and there needs to be a Streamlit app to
+      embed the chat panel into
+- [ ] Scope MCP tool contracts: `get_holdings(strategy_used, ticker,
+  as_of_date)`, `get_trade_history(strategy_used, symbol, start_date,
+  end_date)`, `get_strategy_signal(strategy_used, symbol, date)`,
+      `get_performance_summary(strategy_used, start_date, end_date)`
+- [ ] Build MCP server (Python `mcp` SDK, stdio transport — no FastAPI/HTTP
+      layer unless a non-Claude-Desktop client actually requires it)
+- [ ] Verify tools work via `claude mcp add` in Claude Desktop
+- [ ] Plain tool-calling loop on top of the MCP tools (single agent loop,
+      model sequences its own tool calls) — no LangGraph graph unless a real
+      branching/stateful need shows up once built against real questions
+- [ ] Write 5-10 eval question/expected-answer pairs alongside tool
+      development, not deferred to a later phase
+- [ ] Basic tracing (LangSmith or Langfuse) wired in from the start
+- [ ] Embed the agent as a chat panel in the Phase 9 Streamlit app
+      (in-process, direct Python import — not another MCP round-trip)
 
 ### Phase 10 — Data quality / QC framing
 

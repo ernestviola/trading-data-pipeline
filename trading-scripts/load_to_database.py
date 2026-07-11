@@ -6,7 +6,13 @@ cs = conn.cursor()
 
 
 def load_csv_to_snowflake(
-    table_name, matching_sql, csv_path: Path, delete_where_sql=None, delete_params=None
+    table_name,
+    matching_sql,
+    csv_path: Path,
+    delete_where_sql=None,
+    delete_params=None,
+    delete_target_where_sql=None,
+    delete_target_params=None,
 ):
     """
     delete_where_sql/delete_params scope staging cleanup to just the rows
@@ -18,6 +24,19 @@ def load_csv_to_snowflake(
     whole-table TRUNCATE for callers (e.g. raw_prices) that don't share
     their staging table across concurrent callers.
 
+    delete_target_where_sql/delete_target_params optionally clear matching
+    rows from the TARGET table (not staging) before the MERGE, turning this
+    call into a full replace of that scope instead of an incremental
+    append. Needed for callers that recompute their entire history from
+    scratch every run (e.g. main.py's strategy functions, which redo the
+    full trade signal history against the current config every call) -
+    MERGE's WHEN NOT MATCHED THEN INSERT (no UPDATE clause) means a row
+    computed under an old config just sits there forever once it exists,
+    so recalibrating a threshold and rerunning silently has no effect on
+    dates that already have a row. Defaults to None (append-only, the
+    original behavior) for callers where that's actually correct, e.g.
+    raw_prices' genuinely incremental daily loads.
+
     NOTE: this makes concurrent calls correctness-safe (no cross-scope data
     loss), but Snowflake's concurrent-DML conflict detection works at the
     micro-partition level, not exact row level - a small staging table can
@@ -26,6 +45,11 @@ def load_csv_to_snowflake(
     the still-open retry-handling gap.
     """
     print("Processing: ", csv_path)
+
+    if delete_target_where_sql:
+        cs.execute(
+            f"DELETE FROM {table_name} {delete_target_where_sql}", delete_target_params
+        )
 
     # Clear only this call's scope of staging first, not last - guarantees a
     # clean slate before this run's load regardless of whether the previous

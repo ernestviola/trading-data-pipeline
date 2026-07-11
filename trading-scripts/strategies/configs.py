@@ -7,12 +7,18 @@ class MeanReversionConfig:
 
     Window is the number of days the rolling window is active for.
 
-    Strength_threshold is the z_score limit for when a buy or sell is allowed to happen.
-
+    buy_strength_threshold/sell_strength_threshold are the z_score limits
+    for when a buy or sell is allowed to happen, respectively. Split into
+    two instead of one shared value since buy and sell sensitivity aren't
+    necessarily symmetric (e.g. a stricter entry threshold than exit, or
+    vice versa) - each also normalizes signal_strength for sizing.py on its
+    own side (buy fills use buy_strength_threshold, sell fills use
+    sell_strength_threshold).
     """
 
     window: int = 20
-    strength_threshold: float = 1.5
+    buy_strength_threshold: float = 1.5
+    sell_strength_threshold: float = 1.5
 
 
 @dataclass
@@ -24,13 +30,17 @@ class MACDConfig:
     trading days) for the fast EMA, slow EMA, and the EMA-of-MACD signal
     line respectively — 12/26/9 is the conventional default.
 
-    strength_threshold normalizes the PPO-style histogram (see momentum.py)
-    into sizing.py's multiplier range, mirroring z_threshold's role for
-    mean-reversion. This default is a starting guess, not empirically
-    calibrated — expect to tune it once real backtest output exists.
+    buy_strength_threshold/sell_strength_threshold normalize the PPO-style
+    histogram (see momentum.py) into sizing.py's multiplier range, mirroring
+    MeanReversionConfig's split. Unlike mean-reversion, these don't affect
+    *whether* a trade happens (that's the crossover event) - only how a buy
+    fill is sized versus a sell fill for the same normalized histogram
+    magnitude. These defaults are starting guesses, not empirically
+    calibrated - expect to tune them once real backtest output exists.
     """
 
     fast_period: int = 12
     slow_period: int = 26
     signal_period: int = 9
-    strength_threshold: float = 0.5
+    buy_strength_threshold: float = 0.5
+    sell_strength_threshold: float = 0.5

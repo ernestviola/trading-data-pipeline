@@ -38,10 +38,18 @@ def step_2(
         )
         load_csv_to_snowflake(
             "raw_trades",
-            'on target.ticker = source.ticker AND target."date" = source."date"',
+            "on target.ticker = source.ticker AND target.strategy_used = source.strategy_used "
+            'AND target."date" = source."date"',
             csv_path,
             delete_where_sql="WHERE strategy_used = %s AND ticker = %s",
             delete_params=(strategy, ticker),
+            # main.py recomputes this strategy's entire trade history every
+            # run - replace its rows in raw_trades outright rather than only
+            # inserting missing dates, so a config change (e.g. calibrated
+            # thresholds) actually takes effect on rerun instead of leaving
+            # stale rows computed under the old config.
+            delete_target_where_sql="WHERE strategy_used = %s AND ticker = %s",
+            delete_target_params=(strategy, ticker),
         )
 
 
@@ -64,7 +72,9 @@ def main():
         base_position_size,
         max_multiplier,
         shares_held,
-        config=MeanReversionConfig(window=20, strength_threshold=1.5),
+        config=MeanReversionConfig(
+            window=20, buy_strength_threshold=1.5, sell_strength_threshold=2.5
+        ),
     )
 
     step_2(
@@ -74,7 +84,7 @@ def main():
         base_position_size,
         max_multiplier,
         shares_held,
-        config=MACDConfig(),
+        config=MACDConfig(buy_strength_threshold=0.1, sell_strength_threshold=2),
     )
 
 

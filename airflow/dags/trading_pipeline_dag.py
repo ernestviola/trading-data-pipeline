@@ -48,7 +48,11 @@ def generate_trades(**context):
         cash_on_hand = cs.fetchone()[0]
 
         strategy_fn, _ = STRATEGIES[STRATEGY]
-        config = MeanReversionConfig(window=WINDOW, strength_threshold=Z_THRESHOLD)
+        config = MeanReversionConfig(
+            window=WINDOW,
+            buy_strength_threshold=Z_THRESHOLD,
+            sell_strength_threshold=Z_THRESHOLD,
+        )
         for ticker in TICKERS:
             cs.execute(
                 """
@@ -72,8 +76,19 @@ def generate_trades(**context):
             )
             load_csv_to_postgres(
                 "raw_trades",
-                "on target.ticker = source.ticker and target.date = source.date",
+                "on target.ticker = source.ticker and target.strategy_used = source.strategy_used "
+                "and target.date = source.date",
                 csv_path,
+                # generate_trades() recomputes this strategy's entire trade
+                # history every run (same underlying strategy functions as
+                # main.py) - replace rows outright rather than only
+                # inserting missing dates, so a config change actually takes
+                # effect. Mirrors main.py's load_csv_to_snowflake() call;
+                # assumes load_csv_to_postgres eventually gets the same
+                # delete_target_where_sql/delete_target_params support once
+                # this DAG's Postgres->Snowflake migration happens.
+                delete_target_where_sql="WHERE strategy_used = %s AND ticker = %s",
+                delete_target_params=(STRATEGY, ticker),
             )
     finally:
         conn.close()
