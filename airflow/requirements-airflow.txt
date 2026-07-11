@@ -1,5 +1,6 @@
 alpaca-py==0.43.5
 pandas
 numpy
-psycopg2-binary
 python-dotenv
+snowflake-connector-python
+cryptography

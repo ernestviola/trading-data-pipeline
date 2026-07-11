@@ -10,10 +10,16 @@ x-airflow-common: &airflow-common
     AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_SECRET_KEY}
     DATABASE_URL: ${AIRFLOW_DATABASE_URL}
     PYTHONPATH: /opt/airflow/trading-scripts
+    # Overrides .env's SNOWFLAKE_PRIVATE_KEY_PATH, which is a host path
+    # (e.g. /Users/you/.snowflake/snowflake_key.p8) for local script runs.
+    # That path doesn't exist inside the container - only the mount below
+    # does - so it needs a container-side value here instead.
+    SNOWFLAKE_PRIVATE_KEY_PATH: /opt/airflow/.snowflake/snowflake_key.p8
   volumes:
     - ./airflow/dags:/opt/airflow/dags
     - ./trading-scripts:/opt/airflow/trading-scripts
     - ./dbt:/opt/airflow/dbt
+    - ${SNOWFLAKE_PRIVATE_KEY_PATH}:/opt/airflow/.snowflake/snowflake_key.p8:ro
   env_file:
     - .env
 

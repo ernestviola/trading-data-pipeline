@@ -322,10 +322,21 @@ migration below.)_
       `(strategy_used, ticker)` for independent strategy comparison
 - [x] Add `strategy_performance_summary` view (percent-return leaderboard)
 - [x] Harden `load_csv_to_snowflake()` against partial-failure duplicate rows
-- [ ] Update Airflow connection from Postgres type to Snowflake type
-- [ ] Split `generate_trades` into `compute_trades` (dynamic per-ticker
-      mapping, `transformer_role`) + `load_trades` (single sequential task,
-      `loader_role`) — design finalized, not yet implemented in the DAG
+- [x] Update Airflow connection from Postgres type to Snowflake type
+      (`load_csv_to_snowflake`/`snowflake_connection`; `generate_trades` and
+      `new_trades_landed` now use a separate `transformer_role` connection
+      for Gold/Bronze reads, since `loader_role` is Bronze-write-only)
+- [x] Split `generate_trades` into `compute_trades` (dynamic per-ticker
+      mapping via `.expand()`, `transformer_role`) + `load_trades` (single
+      sequential task looping over `compute_trades`' XCom output,
+      `loader_role`). Also fixed a latent scoping bug surfaced by the
+      split: cash/shares lookups now filter by both `ticker` AND
+      `strategy_used`, not just `ticker` — `cash_position`/`holdings_scd2`
+      are partitioned by `(strategy_used, ticker)`, so the old single-value
+      lookup was only safe by accident (one ticker, one strategy)
+- [ ] Generalize the DAG to run all strategies (not just the hardcoded
+      `mean_reversion`) for every ticker in `TICKERS`, mirroring `main.py`'s
+      loop over the `STRATEGIES` registry
 
 ### Phase 6.5 — Second strategy (MACD momentum)
 
@@ -405,8 +416,8 @@ in-process embedding step specifically needs Phase 9 done.
       argument, not hardcoded), and there needs to be a Streamlit app to
       embed the chat panel into
 - [ ] Scope MCP tool contracts: `get_holdings(strategy_used, ticker,
-  as_of_date)`, `get_trade_history(strategy_used, symbol, start_date,
-  end_date)`, `get_strategy_signal(strategy_used, symbol, date)`,
+as_of_date)`, `get_trade_history(strategy_used, symbol, start_date,
+end_date)`, `get_strategy_signal(strategy_used, symbol, date)`,
       `get_performance_summary(strategy_used, start_date, end_date)`
 - [ ] Build MCP server (Python `mcp` SDK, stdio transport — no FastAPI/HTTP
       layer unless a non-Claude-Desktop client actually requires it)

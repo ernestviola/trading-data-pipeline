@@ -13,13 +13,14 @@ colorama==0.4.6
 cryptography==49.0.0
 dacite==1.9.2
 daff==1.4.2
-dbt-adapters==1.24.2
+dbt-adapters==1.24.4
 dbt-common==1.38.0
-dbt-core==1.12.0b3
+dbt-core==1.11.12
 dbt-core-experimental-parser==2.0.0a3
 dbt-extractor==0.6.0
-dbt-postgres==1.10.2
-dbt-protos==1.0.514
+dbt-protos==1.0.541
+dbt-semantic-interfaces==0.9.0
+dbt-snowflake==1.11.6
 dbt-state==2.26.0
 deepdiff==8.6.2
 grpcio==1.81.1
@@ -47,7 +48,6 @@ pandas==3.0.3
 parsedatetime==2.6
 pathspec==1.0.4
 protobuf==6.33.6
-psycopg2-binary==2.9.12
 pycparser==3.0
 pydantic==2.13.4
 pydantic_core==2.46.4
@@ -68,6 +68,7 @@ rich==15.0.0
 rpds-py==2026.6.3
 ruff==0.15.20
 six==1.17.0
+snowflake-connector-python==4.6.0
 snowplow-tracker==1.1.0
 SQLAlchemy==2.0.51
 sqlglot==30.12.0

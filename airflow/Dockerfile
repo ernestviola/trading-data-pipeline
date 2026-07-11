@@ -2,7 +2,7 @@ FROM apache/airflow:2.10.4-python3.12
 
 USER root
 RUN python3 -m venv /opt/dbt_venv && \
-    /opt/dbt_venv/bin/pip install --no-cache-dir dbt-postgres==1.10.2
+    /opt/dbt_venv/bin/pip install --no-cache-dir dbt-snowflake==1.11.6 dbt-core==1.11.12
 
 USER airflow
 COPY airflow/requirements-airflow.txt /requirements-airflow.txt
