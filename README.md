@@ -48,6 +48,18 @@ Key differences from Layer 1, noted here so they aren't lost:
   strategy" that switches between strategies mid-flight is just another
   `strategy_used` value under this shared-cash model — no separate
   architecture needed for it.
+- **This is the actual end goal of this project** — backtesting (Layer 1)
+  is validation before running these strategies as real paper trades for
+  personal use, not the final deliverable. That's the practical reason
+  Phase 8's corporate-actions/dividends source (see Phase 8 below) is worth
+  the extra complexity now rather than later: real paper-trading NAV needs
+  to account for dividend income, and `portfolio_value`/`cash_position`
+  don't model that at all today (a backtesting-only simplification that
+  stops being acceptable once Layer 2 is real money-adjacent behavior,
+  even in a paper account). Landing the data source in Phase 8 doesn't
+  wire it into the NAV math yet - that integration is separate, later
+  work - but it means the data exists when that work happens instead of
+  becoming a Layer 2 blocker discovered after the fact.
 
 ### Layer 3 — Regime switching / intelligent strategy allocation (not started, hardest)
 
@@ -389,8 +401,9 @@ incremental mechanism, distinct from schedule-driven batch orchestration
 - [x] Add a Stream on `raw_trades` to track new rows since last consumption
       (`bronze.raw_trades_stream`, `APPEND_ONLY` - `raw_trades` only ever
       receives inserts, never updates/deletes, so a full standard stream's
-      before/after tracking isn't needed) - written, not yet run against a
-      live account
+      before/after tracking isn't needed) - deployed to the live account;
+      end-to-end behavior (new data landing → stream flips true → task
+      fires → `stg_trades_streaming` populates) not yet confirmed
 - [x] Add a Task that runs a stored procedure MERGE-ing only the Stream's
       changed rows into `silver.stg_trades_streaming` when the Stream has
       data (`WHEN SYSTEM$STREAM_HAS_DATA(...)`) - MERGE instead of INSERT
@@ -440,11 +453,35 @@ incremental mechanism, distinct from schedule-driven batch orchestration
 
 ### Phase 8 — Fivetran / ELT tooling exposure
 
-- [ ] Decide approach (Alpaca isn't a native Fivetran connector) — Option A:
-      custom Fivetran Connector SDK for Alpaca. Option B: genuinely
-      Fivetran-native second source. No decision yet.
-- [ ] Set up Fivetran free tier, land data into Bronze
-- [ ] Document how Fivetran's managed sync differs from custom Python ingestion
+- [x] Decide approach (Alpaca isn't a native Fivetran connector) — **Option
+      A chosen**: build a custom Fivetran Connector SDK connector for
+      Alpaca, rather than Option B (a genuinely Fivetran-native second
+      source like S3/Google Sheets). Reasoning: Option A demonstrates
+      _building_ ELT tooling, which is a stronger match for "hands-on
+      experience with Fivetran or equivalent ELT tooling" than configuring
+      an existing connector would be.
+- [ ] Scope: pull Alpaca's **corporate actions** endpoint (dividends/splits),
+      not another OHLCV bars pull — re-fetching price bars through a second
+      pipeline would just duplicate `gather_historicals.py` →
+      `raw_prices`, not add anything. Corporate actions is a genuinely new
+      Bronze source, and it's deliberately the more complex choice over a
+      simpler alternative (asset/ticker metadata) for a specific reason: it
+      maps directly onto **NAV components** (assets, liabilities, accrued
+      income, corporate-action adjustments) - one of the fund-admin
+      entities the target JD names explicitly - and this project's actual
+      end goal (see Layer 2 note below) needs dividend-aware NAV modeling
+      eventually anyway, so building the data source for it now, even at
+      extra upfront cost, sets up that future work instead of deferring it.
+- [ ] Land corporate actions data into a new Bronze table (e.g.
+      `bronze.raw_corporate_actions`) via the custom connector - this phase
+      is scoped to _landing the data_, not yet wiring it into
+      `cash_position`/`portfolio_value` math. Today those models don't
+      account for dividends at all (a known simplification) - integrating
+      corporate actions into the actual NAV/cash calculations is separate,
+      later work, not part of this phase.
+- [ ] Set up Fivetran free tier, deploy the custom connector
+- [ ] Document how Fivetran's managed sync + Connector SDK differs from the
+      custom Python ingestion path (`gather_historicals.py`)
 
 ### Phase 9 — Streamlit client-facing app
 
