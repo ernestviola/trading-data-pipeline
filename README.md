@@ -380,10 +380,63 @@ migration below.)_
 
 ### Phase 7 — Snowflake Streams & Tasks (incremental processing)
 
-- [ ] Add a Stream on `raw_trades` to track new rows since last consumption
-- [ ] Add a Task to trigger downstream dbt processing when the Stream has data
-- [ ] Document how Stream/Task-driven triggering compares to Airflow's
-      schedule-driven incremental runs
+Deliberately built as a standalone path, not wired into Airflow or dbt - the
+target JD asks for Streams/Tasks specifically as the Snowflake-native
+incremental mechanism, distinct from schedule-driven batch orchestration
+(which Airflow/dbt already demonstrate elsewhere in this project). See
+`sql/snowflake/002_setup_streams_and_tasks.sql`.
+
+- [x] Add a Stream on `raw_trades` to track new rows since last consumption
+      (`bronze.raw_trades_stream`, `APPEND_ONLY` - `raw_trades` only ever
+      receives inserts, never updates/deletes, so a full standard stream's
+      before/after tracking isn't needed) - written, not yet run against a
+      live account
+- [x] Add a Task that runs a stored procedure MERGE-ing only the Stream's
+      changed rows into `silver.stg_trades_streaming` when the Stream has
+      data (`WHEN SYSTEM$STREAM_HAS_DATA(...)`) - MERGE instead of INSERT
+      because `main.py`/the DAG full-replace `raw_trades` on a config change
+      (delete + re-insert), which an append-only stream sees as new rows,
+      not updates; without a MERGE keyed on `(ticker, strategy_used,
+  trade_date)` a full-replace upstream would duplicate rows here rather
+      than overwrite them - written, not yet run against a live account
+- [x] Document how Stream/Task-driven triggering compares to Airflow's
+      schedule-driven incremental runs (below)
+
+**Streams/Tasks vs. Airflow - comparison**
+
+- **What triggers work.** Airflow's `check_new_trades` polls on a fixed
+  schedule (`@daily`) and short-circuits if nothing landed - the DAG still
+  wakes up and evaluates even when there's nothing to do. A Task's
+  `WHEN SYSTEM$STREAM_HAS_DATA(...)` clause still evaluates on its own
+  schedule (here, every minute), but skips spinning up warehouse compute
+  entirely when the stream is empty - the "poll" itself is metadata-only and
+  free; only the actual `CALL` costs compute.
+- **What "incremental" means.** `dbt run` re-evaluates each model's full
+  defined query every run - for `stg_trades` that's a full scan/reload of
+  `raw_trades`, not just what's new, even though the transformation itself
+  is simple. A Stream tracks exact row-level offsets since last consumption,
+  so the Task's `MERGE` only ever touches genuinely new rows - the "keeping
+  normalized datasets fresh without full reprocessing" framing directly.
+- **Where the transformation logic lives.** dbt models are declarative SQL
+  with lineage, tests, and docs generation built around them - strong for
+  anything client-facing or governed. The stored procedure here is
+  imperative SQL with none of that tooling - fine for a narrow, fast,
+  internal freshness path, but it doesn't get dbt's testing/documentation
+  for free, and duplicating real transformation logic (e.g. the recursive
+  CTEs in `int_portfolio_cash`) into a procedure would mean maintaining the
+  same logic twice.
+- **Failure handling.** Airflow retries (`retries: 3`,
+  `retry_delay: timedelta(minutes=5)`) are explicit, visible in the UI, and
+  alertable. A Task's failure history lives in
+  `INFORMATION_SCHEMA.TASK_HISTORY` - queryable, but there's no
+  out-of-the-box UI/alerting layer the way Airflow has one built in.
+- **When each earns its place.** Streams/Tasks fit a narrow, low-latency,
+  single-table-to-single-table freshness problem where spinning up an
+  orchestrator's overhead isn't worth it. Airflow/dbt fit anything with
+  real dependency chains, multi-step lineage, or where testing/docs/alerting
+  matter more than shaving latency - which is most of this project's Silver/
+  Gold layer, hence why this stays a standalone comparison rather than a
+  replacement for the existing DAG.
 
 ### Phase 8 — Fivetran / ELT tooling exposure
 
