@@ -410,7 +410,7 @@ incremental mechanism, distinct from schedule-driven batch orchestration
       because `main.py`/the DAG full-replace `raw_trades` on a config change
       (delete + re-insert), which an append-only stream sees as new rows,
       not updates; without a MERGE keyed on `(ticker, strategy_used,
-  trade_date)` a full-replace upstream would duplicate rows here rather
+trade_date)` a full-replace upstream would duplicate rows here rather
       than overwrite them - written, not yet run against a live account
 - [x] Document how Stream/Task-driven triggering compares to Airflow's
       schedule-driven incremental runs (below)
@@ -460,28 +460,111 @@ incremental mechanism, distinct from schedule-driven batch orchestration
       _building_ ELT tooling, which is a stronger match for "hands-on
       experience with Fivetran or equivalent ELT tooling" than configuring
       an existing connector would be.
-- [ ] Scope: pull Alpaca's **corporate actions** endpoint (dividends/splits),
-      not another OHLCV bars pull — re-fetching price bars through a second
-      pipeline would just duplicate `gather_historicals.py` →
-      `raw_prices`, not add anything. Corporate actions is a genuinely new
-      Bronze source, and it's deliberately the more complex choice over a
-      simpler alternative (asset/ticker metadata) for a specific reason: it
-      maps directly onto **NAV components** (assets, liabilities, accrued
-      income, corporate-action adjustments) - one of the fund-admin
-      entities the target JD names explicitly - and this project's actual
-      end goal (see Layer 2 note below) needs dividend-aware NAV modeling
-      eventually anyway, so building the data source for it now, even at
-      extra upfront cost, sets up that future work instead of deferring it.
-- [ ] Land corporate actions data into a new Bronze table (e.g.
-      `bronze.raw_corporate_actions`) via the custom connector - this phase
-      is scoped to _landing the data_, not yet wiring it into
-      `cash_position`/`portfolio_value` math. Today those models don't
-      account for dividends at all (a known simplification) - integrating
-      corporate actions into the actual NAV/cash calculations is separate,
-      later work, not part of this phase.
-- [ ] Set up Fivetran free tier, deploy the custom connector
+- [x] Scope: pull Alpaca's **corporate actions** endpoint — expanded during
+      build from the original dividends/splits-only scope to **all 14**
+      corporate action types Alpaca supports (splits, mergers, spinoffs,
+      name changes, etc.), landed unfiltered. Reasoning: `symbols` is
+      filtered at extract time (bounded by `TICKERS` — a real entity-scope
+      boundary), but `types` isn't, since excluding a type at extract means
+      discarding a category permanently with no principled reason to rule
+      it out yet — that's Transform's job, not Extract's, per ELT
+      philosophy. Not another OHLCV bars pull — re-fetching price bars
+      through a second pipeline would just duplicate `gather_historicals.py`
+      → `raw_prices`, not add anything. Corporate actions maps directly onto
+      **NAV components** (assets, liabilities, accrued income,
+      corporate-action adjustments) - one of the fund-admin entities the
+      target JD names explicitly - and this project's actual end goal (see
+      Layer 2 note below) needs dividend-aware NAV modeling eventually
+      anyway, so building the data source for it now, even at extra upfront
+      cost, sets up that future work instead of deferring it.
+- [x] Land corporate actions data into Bronze via the custom connector -
+      lands in `alpaca_corporate_actions.raw_corporate_actions`, **not**
+      `bronze.raw_corporate_actions` as originally planned (see "Fivetran
+      forces one schema per connection" below) - this phase is scoped to
+      _landing the data_, not yet wiring it into `cash_position`/
+      `portfolio_value` math. Today those models don't account for
+      dividends at all (a known simplification) - integrating corporate
+      actions into the actual NAV/cash calculations is separate, later
+      work, not part of this phase.
+- [x] Set up Fivetran free tier, deploy the custom connector - deployed and
+      running an initial full-history sync (2023–present) against
+      `trading_pipeline`, `fivetran_role`, key-pair auth via a dedicated
+      Snowflake `SERVICE` user (`fivetran_svc`), separate from the personal
+      `ernestviola` key pair used elsewhere in this project.
 - [ ] Document how Fivetran's managed sync + Connector SDK differs from the
       custom Python ingestion path (`gather_historicals.py`)
+
+**Design decisions — Fivetran corporate actions connector, resolved**
+
+- **Endpoint: `CorporateActionsClient.get_corporate_actions()`, not the
+  deprecated `TradingClient.get_corporate_announcements()`.** The
+  deprecated endpoint caps date ranges at 90 days per request - unworkable
+  for a multi-year historical backfill without manual windowing. The
+  current endpoint has no such cap.
+- **Cursor: `process_date` (Alpaca's own ingestion date), not any business
+  date** (`ex_date`/`declaration_date`/etc.). Alpaca's docs explicitly warn
+  corporate actions can arrive from their data providers well after the
+  event itself occurred; cursoring on a business date risks silently
+  dropping late-arriving records once the sync window moves past them.
+  `start`/`end` on `CorporateActionsRequest` filter and sort on
+  `process_date` under the hood, confirmed against the underlying REST
+  reference - the SDK just doesn't name the field explicitly in its own
+  docstring.
+- **7-day lookback window on every incremental sync**, checkpoint capped at
+  `today - 7` rather than `today`. Same-day stragglers (a correction
+  landing hours after that day's sync already ran) get silently missed
+  otherwise. Dedup on re-fetched records is free via `id`-keyed
+  `op.upsert()` - no custom dedup logic needed. Known gap: a delay longer
+  than 7 days would still be missed; accepted as a documented limitation
+  rather than solved, same spirit as the `mean_reversion`
+  zero-quantity-trades tradeoff.
+- **`CorporateActionsRequest(limit=None)`, explicitly** - the field
+  defaults to `1000` if unset, which silently caps the _total_ records
+  returned across every symbol and type combined, with no error and no
+  signal more exist. Traced directly from `alpaca-py`'s internal
+  `_get_marketdata()` pagination loop: it walks `next_page_token` correctly,
+  but only continues while `total_items < limit` - so an unset `limit`
+  defaulting to `1000` stops the loop exactly at that ceiling. Passing
+  `limit=None` disables the total cap; per-request page size is still
+  capped by the SDK internally, but pagination continues until Alpaca
+  itself returns no further `next_page_token`.
+- **Bronze table shape: narrow real columns + one `VARIANT`/`JSON` payload
+  column, not a wide table or per-type tables.** The 14 corporate action
+  types are a genuine union of differently-shaped records (a cash
+  dividend's `rate` and a split's `old_rate`/`new_rate` aren't the same
+  kind of number), so a single wide table would mean pre-deciding a
+  relational shape - real interpretation work - before Silver ever runs,
+  and would break the moment Alpaca adds a 15th type. `id`, `symbol`,
+  `ca_type`, `process_date` are declared as real columns (enough to
+  identify, dedup, and cursor on); the full raw record lands untouched in
+  one `payload` column. Every type takes the identical path with zero
+  type-specific decisions made in Bronze - shaping is deferred entirely to
+  a future Silver staging model, mirroring how `stg_trades` already shapes
+  `raw_trades`.
+- **New `fivetran_role`, not a reuse of `loader_role`.** Same reasoning as
+  the existing `loader_role`/`transformer_role` split - auditable,
+  independently revocable blast radius per ingestion tool. Authenticates as
+  a dedicated Snowflake `SERVICE` user with its own key pair, never the
+  personal `ernestviola` credentials used elsewhere in this project.
+- **Fivetran forces one destination schema per connection - a real,
+  structural limit discovered mid-build, not a config choice.** The
+  original plan was landing directly in `bronze.raw_corporate_actions`,
+  alongside `raw_prices`/`raw_trades`. Fivetran's Connector SDK doesn't
+  support this: each connection gets its own auto-named destination schema
+  (named from the connection name), enforced for write isolation between
+  connectors, and un-renameable after creation without deploying an
+  entirely new connection. A multi-destination workaround exists (separate
+  Fivetran destinations, both pointed at the same Snowflake database/role,
+  independently configured to use the schema name `bronze`) but was
+  rejected - Fivetran's own docs flag exactly the failure mode already
+  documented above under the concurrent-`DELETE`-retry bug: two independent
+  writers assuming exclusive control of shared destination state.
+  Resolution: accept per-connector schemas
+  (`alpaca_corporate_actions.raw_corporate_actions`) and unify at the
+  transformation layer instead - `sources.yml` will point at it directly
+  in Phase 9's dbt work, the same way it points at `bronze.raw_prices`
+  today. "Bronze" becomes a logical raw-data layer spanning schemas, not
+  one physical schema name.
 
 ### Phase 9 — Streamlit client-facing app
 
@@ -547,5 +630,7 @@ end_date)`, `get_strategy_signal(strategy_used, symbol, date)`,
 - **Warehouse**: Snowflake (Bronze/Silver/Gold, role-based access control)
 - **Transformation**: dbt (`dbt-snowflake`)
 - **Orchestration**: Airflow (Docker Compose, LocalExecutor)
-- **Planned**: Streamlit (client-facing dashboard), Fivetran (ELT exposure),
+- **ELT**: Fivetran (custom Connector SDK connector for Alpaca corporate
+  actions, deployed and syncing)
+- **Planned**: Streamlit (client-facing dashboard),
   MCP server + tool-calling agent (chat layer over pipeline data)
