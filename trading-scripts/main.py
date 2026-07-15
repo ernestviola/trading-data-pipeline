@@ -2,7 +2,6 @@ from gather_historicals import gather_historicals
 from load_to_database import load_csv_to_snowflake
 from datetime import datetime
 from strategies import STRATEGIES
-from strategies.configs import MeanReversionConfig, MACDConfig
 import os
 
 
@@ -18,39 +17,41 @@ def step_1(tickers, start, end):
 
 def step_2(
     tickers,
-    strategy,
     starting_cash,
     base_position_size,
     max_multiplier,
     shares_held,
-    config,
 ):
-    strategy_fn, _ = STRATEGIES[strategy]
-    for ticker in tickers:
-        csv_path = strategy_fn(
-            ticker,
-            starting_cash,
-            base_position_size,
-            max_multiplier,
-            shares_held,
-            strategy_used=strategy,
-            config=config,
-        )
-        load_csv_to_snowflake(
-            "raw_trades",
-            "on target.ticker = source.ticker AND target.strategy_used = source.strategy_used "
-            'AND target."date" = source."date"',
-            csv_path,
-            delete_where_sql="WHERE strategy_used = %s AND ticker = %s",
-            delete_params=(strategy, ticker),
-            # main.py recomputes this strategy's entire trade history every
-            # run - replace its rows in raw_trades outright rather than only
-            # inserting missing dates, so a config change (e.g. calibrated
-            # thresholds) actually takes effect on rerun instead of leaving
-            # stale rows computed under the old config.
-            delete_target_where_sql="WHERE strategy_used = %s AND ticker = %s",
-            delete_target_params=(strategy, ticker),
-        )
+
+    for strategy in STRATEGIES:
+        strategy_fn, config = STRATEGIES[strategy]
+
+        for ticker in tickers:
+            csv_path = strategy_fn(
+                ticker,
+                starting_cash,
+                base_position_size,
+                max_multiplier,
+                shares_held,
+                strategy_used=strategy,
+                config=config(),
+            )
+
+            load_csv_to_snowflake(
+                "raw_trades",
+                "on target.ticker = source.ticker AND target.strategy_used = source.strategy_used "
+                'AND target."date" = source."date"',
+                csv_path,
+                delete_where_sql="WHERE strategy_used = %s AND ticker = %s",
+                delete_params=(strategy, ticker),
+                # main.py recomputes this strategy's entire trade history every
+                # run - replace its rows in raw_trades outright rather than only
+                # inserting missing dates, so a config change (e.g. calibrated
+                # thresholds) actually takes effect on rerun instead of leaving
+                # stale rows computed under the old config.
+                delete_target_where_sql="WHERE strategy_used = %s AND ticker = %s",
+                delete_target_params=(strategy, ticker),
+            )
 
 
 def main():
@@ -59,6 +60,7 @@ def main():
     tickers = ["AAPL"]
     start = datetime(2023, 1, 1)
     end = datetime.now()
+
     base_position_size = 500
     max_multiplier = 3
     shares_held = 0
@@ -67,24 +69,10 @@ def main():
 
     step_2(
         tickers,
-        "mean_reversion",
         STARTING_CASH,
         base_position_size,
         max_multiplier,
         shares_held,
-        config=MeanReversionConfig(
-            window=20, buy_strength_threshold=1.5, sell_strength_threshold=2.5
-        ),
-    )
-
-    step_2(
-        tickers,
-        "macd_momentum",
-        STARTING_CASH,
-        base_position_size,
-        max_multiplier,
-        shares_held,
-        config=MACDConfig(buy_strength_threshold=0.1, sell_strength_threshold=2),
     )
 
 

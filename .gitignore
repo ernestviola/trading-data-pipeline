@@ -17,3 +17,6 @@ snowflake_key.pub
 #fivetran
 configuration.json
 fivetran/*/files
+
+#streamlit
+.streamlit/secrets.toml

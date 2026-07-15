@@ -18,7 +18,7 @@ class MeanReversionConfig:
 
     window: int = 20
     buy_strength_threshold: float = 1.5
-    sell_strength_threshold: float = 1.5
+    sell_strength_threshold: float = 2.5
 
 
 @dataclass
@@ -42,5 +42,5 @@ class MACDConfig:
     fast_period: int = 12
     slow_period: int = 26
     signal_period: int = 9
-    buy_strength_threshold: float = 0.5
-    sell_strength_threshold: float = 0.5
+    buy_strength_threshold: float = 0.1
+    sell_strength_threshold: float = 2
