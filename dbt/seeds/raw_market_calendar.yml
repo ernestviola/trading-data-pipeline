@@ -1,0 +1,10 @@
+version: 2
+
+seeds:
+  - name: raw_market_calendar
+    config:
+      schema: bronze
+      column_types:
+        market_date: DATE
+        open: TIMESTAMP_NTZ
+        close: TIMESTAMP_NTZ
