@@ -73,30 +73,34 @@ performance data to make switching decisions from.
 
 ```
 Alpaca API (historical OHLCV)
-        │
-        ▼
-  Bronze (Snowflake, loader_role)
-  raw_prices, raw_trades — landed via PUT + COPY INTO + staging/MERGE dedup
-        │
-        ▼
-  Silver (Snowflake, transformer_role — dbt)
-  stg_prices, stg_trades → int_portfolio_cash, int_position_cost_basis
-  (recursive CTEs, partitioned by strategy_used + ticker)
-        │
-        ▼
-  Gold (Snowflake, transformer_role — dbt)
-  holdings_scd2, cash_position, portfolio_value (incremental),
-  strategy_performance_summary (view)
-        │
-        ▼
-   Airflow DAG orchestrates ingestion + dbt runs,
-   with retries + dynamic per-ticker task mapping
+│
+▼
+Bronze (Snowflake, loader_role)
+raw_prices, raw_trades — landed via PUT + COPY INTO + staging/MERGE dedup
+│
+▼
+Silver (Snowflake, transformer_role — dbt)
+stg_prices, stg_trades → int_portfolio_cash, int_position_cost_basis
+(recursive CTEs, partitioned by strategy_used + ticker)
+│
+▼
+Gold (Snowflake, transformer_role — dbt)
+holdings_scd2, cash_position, portfolio_value (incremental),
+strategy_performance_summary (view)
+│
+▼
+Airflow DAG orchestrates ingestion + dbt runs (thin wrapper around
+main.py's step_1/step_2 — see "DAG became a thin wrapper" below)
+
 ```
 
 **Role-based access control:**
 
 - `loader_role` — write access to Bronze only. Used by Python ingestion.
 - `transformer_role` — read-only on Bronze, read/write Silver + Gold. Used by dbt.
+- `streamlit_role` — read-only on Gold only. Used by the Streamlit app
+  (`streamlit_svc` service user, own key pair) — narrower than
+  `transformer_role` since the dashboard never needs Silver.
 - `SYSADMIN` — read access across all three schemas, for manual browsing
   without switching roles. `ACCOUNTADMIN` is left untouched, reserved for
   account-level operations.
@@ -183,16 +187,91 @@ starting_cash`), not raw dollar gain, so it's fair across strategies.
   retry-on-conflict handling wrapped around `load_csv_to_snowflake()` — not
   yet implemented. Today this doesn't block anything: `main.py`'s two
   `step_2()` calls run sequentially in one process, not concurrently.
+- **Negative `shares_held` in `holdings_scd2`, root-caused to the DAG
+  feeding stale Gold state into what is actually a full-history replay
+  every run — fixed by making the DAG a thin wrapper around `main.py`.**
+  Surfaced via `select * from holdings_scd2 where shares_held < 0`
+  returning real rows. Traced through the stack: `int_position_cost_basis`'s
+  recursive CTE has no floor on `shares_held - quantity` for a sell (by
+  design — see `size_trades` below), so a sell that legitimately exceeds
+  current holdings goes negative and that bad running total propagates
+  through every later row for that `(strategy_used, ticker)`. `sizing.py`'s
+  `size_trades()` itself is correct in isolation — `qty = min(desired_qty,
+shares_held)` guarantees a fresh position's first sell is always `qty=0`
+  — _provided_ it's called with the right starting `shares_held`. The DAG's
+  old `compute_trades` task read `cash_position`/`holdings_scd2`'s
+  `is_current` row as the starting state for each run, intended for
+  incremental processing — but every strategy function (`mean_reversion()`,
+  etc.) actually recomputes signals and sizes trades across the **entire**
+  price history from scratch every call, same as `main.py`. So the DAG was
+  feeding a previous run's _ending_ balance into `size_trades()` as the
+  _starting_ balance for a full replay from 2023 - meaning trade #1 of the
+  replay (chronologically first, but not actually "first" from
+  `size_trades()`'s point of view) could see a non-zero `shares_held` and
+  produce a real, non-zero sell where a fresh run would have correctly
+  produced zero. Confirmed by cross-checking `main.py` (hardcodes
+  `shares_held=0`, unaffected) against the DAG (read stale Gold state,
+  affected) and by observing the corrupted value stayed pinned across many
+  months of subsequent rows with no new trades in between, consistent with
+  a bad running total rather than fresh data.
+  **Fix, in two parts:**
+  1. **`portfolio_value` needed `dbt run --select portfolio_value
+--full-refresh`** to actually clear the corrupted historical rows -
+     its `is_incremental()` filter (`where p.price_date > max(price_date)
+in this`) is a single global watermark, not scoped per
+     `(strategy_used, ticker)`, so a plain `dbt run` can never revisit
+     dates already "covered" by that watermark even after the upstream
+     data is fixed. This is a recurring operational quirk, not a one-off -
+     any future backfill of historical data for a new ticker (see GOOGL
+     below) hits the same gap and needs the same manual `--full-refresh`.
+  2. **The DAG no longer reads Gold for starting state at all.** Decided
+     to stop treating the DAG as incremental and instead have it do a
+     full-history replay every run, same as `main.py` - simpler than
+     making `mean_reversion()`/`momentum()` genuinely incremental, and
+     removes the stale-state bug by construction rather than patching
+     around it. This made the DAG's own `compute_trades`/`load_trades`
+     logic pure duplication of `main.py`'s `step_1`/`step_2` (same
+     strategy loop, same hardcoded `shares_held=0`/`STARTING_CASH`, same
+     `load_csv_to_snowflake` call) - so the DAG was refactored into a
+     thin wrapper that imports and calls `step_1`/`step_2` directly
+     rather than reimplementing them. This also meant `main.py` itself
+     needed a small refactor first: `step_2` used to be called once per
+     strategy with hand-written config instances inline; it now loops
+     over the `STRATEGIES` registry directly (`config_cls()` builds a
+     fresh calibrated instance per strategy, since calibrated values live
+     as the dataclass defaults in `strategies/configs.py` - previously
+     `main.py` and `configs.py` had drifted, with the real calibrated
+     numbers only living in `main.py`'s inline calls; fixed by making
+     `configs.py`'s defaults the single source of truth), so both
+     `main.py`'s own run and the DAG's `PythonOperator` call the exact
+     same implementation.
+     **Consequence for `.expand()`:** the DAG's `compute_trades` no longer
+     exists as a separately-mapped task - since `step_2`'s own trade
+     computation and `raw_trades` load now happen together per ticker inside
+     one function call (not split across two tasks the way `compute_trades`/
+     `load_trades` used to be), parallelizing it would reintroduce the exact
+     concurrent-staging-table risk that `load_trades` was deliberately kept
+     sequential to avoid. The DAG's trade-computation task is now a single
+     sequential task, mirroring `main.py`'s own sequential `for ticker in
+tickers` loop inside `step_2`.
+     **`check_new_trades` also needed rethinking**, since it used to check
+     whether new rows landed in `raw_trades` for today's `data_interval` -
+     meaningless once `raw_trades` is always fully replayed every run
+     regardless of whether anything new actually happened. Renamed to
+     `new_data_landed` and repointed at `raw_prices` instead (does today's
+     data interval have a new price bar) - this restores the original intent
+     (skip `run_dbt` on days with genuinely nothing new, e.g. weekends/market
+     holidays) using a signal that's still meaningful post-fix.
+- **`COPY INTO` + staging + `MERGE` needs staging cleared at the _start_
+  of a load, not the end.** _(see above, unchanged)_
 - **Dynamic per-ticker Airflow task mapping is safe for computation, not yet
-  for shared-resource writes.** `compute_trades` can be `.expand()`-ed per
-  ticker (each instance reads Gold independently, no shared state).
-  `load_trades` still can't safely be parallelized despite the scoped-
-  `DELETE` fix above, for the same concurrent-DML reason — `load_trades`
-  stays a single sequential task that loops over each ticker's CSV path from
-  `compute_trades`'s XCom output until retry-on-conflict logic exists.
-  (`pull_prices`/price-loading has the same latent risk if it's ever split
-  the same way — not yet hit in practice, revisit if it becomes a real
-  task.)
+  for shared-resource writes — superseded, see the negative-`shares_held`
+  fix above.** `compute_trades` used to be `.expand()`-ed per ticker (each
+  instance reads Gold independently, no shared state); `load_trades` stayed
+  a single sequential task for concurrent-DML reasons. This split no longer
+  exists post-refactor - the DAG's trade computation is one sequential task
+  now, for the reasons detailed above, not because the original concurrent-
+  write reasoning was wrong.
 - **Snowflake connections are role-scoped, not schema-locked by default.**
   `snowflake_connection(role, schema=None)` is a shared helper — `schema` is
   only hardcoded at the call site for connections that structurally can only
@@ -210,6 +289,18 @@ starting_cash`), not raw dollar gain, so it's fair across strategies.
   position-awareness or filtering zero-quantity rows; worth surfacing if
   strategy performance comparison ever needs to explain a divergence between
   the two.
+- **Adding a new ticker needs a one-time manual historical backfill —
+  the DAG alone won't do it.** `pull_prices` only ever pulls Airflow's
+  current `data_interval` window; there's no mechanism for a ticker newly
+  added to `TICKERS` to retroactively get 2023-to-now price history just
+  because it's new to the list (confirmed when adding GOOGL only pulled
+  the latest day). `main.py`'s `step_1` already does the right thing (hard-
+  coded `2023-01-01` to now) - the fix is running `step_1` manually once
+  for the new ticker before the DAG's daily runs take over. `airflow dags
+backfill` is the wrong tool for this specifically - it replays a DAG
+  across historical _scheduled_ windows, which would mean replaying the
+  now-full-history `step_2` computation once per historical day, not
+  backfilling one ticker's price history once.
 
 ## Design decisions — momentum strategy (MACD), resolved
 
@@ -250,8 +341,9 @@ validation/autocomplete, and letting`step_2()`pass a strategy's config
 through untouched without knowing its shape. Both configs share the
 field name`strength_threshold`for their sizing-normalization role
 (mean-reversion's also doubles as its buy/sell trigger cutoff; MACD's
-trigger is the crossover event in fork 1, so its`strength_threshold`
-   only feeds sizing).
+trigger is the crossover event in fork 1, so its`strength_threshold`   only feeds sizing). Calibrated values from`calibrate_thresholds.py`   live as the dataclass **defaults** in`configs.py`— the single source
+   of truth`main.py`'s `STRATEGIES` loop and the DAG both construct fresh
+   instances from (`config_cls()`).
 
 Related refactor this forces regardless: **`sizing.py` currently hardcodes
 `row.z_score`** in its strength calculation. Since MACD won't produce a
@@ -259,7 +351,7 @@ z-score, `sizing.py` needs to generalize to consume a neutral
 `signal_strength` column directly (computed per-strategy upstream, per fork
 2 above) rather than deriving `abs(z_score)` itself.
 
-## Agent layer — scoping (paused, sequenced after Phase 9 / Streamlit)
+## Agent layer — scoping (paused, sequenced after Phase 10 / QC)
 
 Goal: a conversational "what and why" layer over the pipeline's data — not a
 replacement for Phase 9's Streamlit dashboard, but a chat panel embedded in
@@ -275,12 +367,12 @@ the design is scoped for defensibility, not buzzword coverage.
   mirrors the same principle behind `signal_strength` in the data layer —
   the multi-strategy comparison is the actual differentiator for this
   feature, not single-strategy Q&A. This was originally the phase's only
-  blocker (**Phase 6.5**, now done). It's since moved to **after Phase 9**
+  blocker (**Phase 6.5**, now done). It's since moved to **after Phase 10**
   too — a standalone agent layer with no Streamlit app to embed into is
   speculative rather than a real integration, so it's sequenced as
-  Phase 9.5. The MCP server itself is still independently demoable via
+  Phase 11. The MCP server itself is still independently demoable via
   Claude Desktop regardless of Streamlit; only the in-process chat-panel
-  embedding specifically needs Phase 9 done first.
+  embedding specifically needs Phase 9/10 done first.
 - **No LangGraph, at least initially.** The example questions ("why did the
   strategy exit AAPL," "how did performance change since the threshold
   changed") are sequential multi-tool lookups with no branching and no need
@@ -335,20 +427,13 @@ migration below.)_
 - [x] Add `strategy_performance_summary` view (percent-return leaderboard)
 - [x] Harden `load_csv_to_snowflake()` against partial-failure duplicate rows
 - [x] Update Airflow connection from Postgres type to Snowflake type
-      (`load_csv_to_snowflake`/`snowflake_connection`; `generate_trades` and
-      `new_trades_landed` now use a separate `transformer_role` connection
-      for Gold/Bronze reads, since `loader_role` is Bronze-write-only)
-- [x] Split `generate_trades` into `compute_trades` (dynamic per-ticker
-      mapping via `.expand()`, `transformer_role`) + `load_trades` (single
-      sequential task looping over `compute_trades`' XCom output,
-      `loader_role`). Also fixed a latent scoping bug surfaced by the
-      split: cash/shares lookups now filter by both `ticker` AND
-      `strategy_used`, not just `ticker` — `cash_position`/`holdings_scd2`
-      are partitioned by `(strategy_used, ticker)`, so the old single-value
-      lookup was only safe by accident (one ticker, one strategy)
-- [ ] Generalize the DAG to run all strategies (not just the hardcoded
-      `mean_reversion`) for every ticker in `TICKERS`, mirroring `main.py`'s
-      loop over the `STRATEGIES` registry
+      (`load_csv_to_snowflake`/`snowflake_connection`)
+- [x] Generalize the DAG to run all strategies for every ticker in
+      `TICKERS`, mirroring `main.py`'s loop over the `STRATEGIES` registry —
+      superseded the original `compute_trades`/`load_trades` `.expand()`
+      split entirely; see the negative-`shares_held` writeup above for why
+      the DAG became a thin wrapper around `main.py`'s `step_1`/`step_2`
+      instead
 
 ### Phase 6.5 — Second strategy (MACD momentum)
 
@@ -387,8 +472,9 @@ migration below.)_
       guard fired as intended (a combo that looked best in-sample lost
       money out-of-sample).
 - [x] Ran `calibrate_thresholds.py` against real AAPL data; updated both
-      configs' defaults in `main.py` with the sweep + out-of-sample-checked
-      thresholds
+      configs' defaults in `configs.py` with the sweep + out-of-sample-
+      checked thresholds (previously drifted into `main.py`'s inline calls
+      instead — fixed as part of the DAG-refactor work above)
 
 ### Phase 7 — Snowflake Streams & Tasks (incremental processing)
 
@@ -417,13 +503,13 @@ trade_date)` a full-replace upstream would duplicate rows here rather
 
 **Streams/Tasks vs. Airflow - comparison**
 
-- **What triggers work.** Airflow's `check_new_trades` polls on a fixed
-  schedule (`@daily`) and short-circuits if nothing landed - the DAG still
-  wakes up and evaluates even when there's nothing to do. A Task's
-  `WHEN SYSTEM$STREAM_HAS_DATA(...)` clause still evaluates on its own
-  schedule (here, every minute), but skips spinning up warehouse compute
-  entirely when the stream is empty - the "poll" itself is metadata-only and
-  free; only the actual `CALL` costs compute.
+- **What triggers work.** Airflow's `check_new_trades`/`new_data_landed`
+  polls on a fixed schedule (`@daily`) and short-circuits if nothing landed
+  - the DAG still wakes up and evaluates even when there's nothing to do. A
+    Task's `WHEN SYSTEM$STREAM_HAS_DATA(...)` clause still evaluates on its
+    own schedule (here, every minute), but skips spinning up warehouse compute
+    entirely when the stream is empty - the "poll" itself is metadata-only and
+    free; only the actual `CALL` costs compute.
 - **What "incremental" means.** `dbt run` re-evaluates each model's full
   defined query every run - for `stg_trades` that's a full scan/reload of
   `raw_trades`, not just what's new, even though the transformation itself
@@ -486,11 +572,6 @@ trade_date)` a full-replace upstream would duplicate rows here rather
       dividends at all (a known simplification) - integrating corporate
       actions into the actual NAV/cash calculations is separate, later
       work, not part of this phase.
-- [x] Set up Fivetran free tier, deploy the custom connector - deployed and
-      running an initial full-history sync (2023–present) against
-      `trading_pipeline`, `fivetran_role`, key-pair auth via a dedicated
-      Snowflake `SERVICE` user (`fivetran_svc`), separate from the personal
-      `ernestviola` key pair used elsewhere in this project.
 - [ ] Document how Fivetran's managed sync + Connector SDK differs from the
       custom Python ingestion path (`gather_historicals.py`)
 
@@ -544,8 +625,7 @@ trade_date)` a full-replace upstream would duplicate rows here rather
 - **New `fivetran_role`, not a reuse of `loader_role`.** Same reasoning as
   the existing `loader_role`/`transformer_role` split - auditable,
   independently revocable blast radius per ingestion tool. Authenticates as
-  a dedicated Snowflake `SERVICE` user with its own key pair, never the
-  personal `ernestviola` credentials used elsewhere in this project.
+  a dedicated Snowflake `SERVICE` user with its own key pair
 - **Fivetran forces one destination schema per connection - a real,
   structural limit discovered mid-build, not a config choice.** The
   original plan was landing directly in `bronze.raw_corporate_actions`,
@@ -568,26 +648,40 @@ trade_date)` a full-replace upstream would duplicate rows here rather
 
 ### Phase 9 — Streamlit client-facing app
 
-- [ ] Comparison chart: all strategies against one chosen ticker
-- [ ] Leaderboard view: best strategy per ticker, across all tickers
+- [x] Comparison chart: all strategies against one chosen ticker
+- [x] Leaderboard view: best strategy per ticker, across all tickers
       (reads `strategy_performance_summary` directly)
-- [ ] Current holdings table, data quality/test status indicator
-- [ ] Scope as a thin client-facing view, not a full app
+- [x] Current holdings table (pivoted: metrics as rows, ticker/strategy as
+      two-level columns, filterable by ticker)
+- [x] Scope as a thin client-facing view, not a full app
+- [x] Deployed to Streamlit in Snowflake (Workspaces), alongside local dev
+      version — `streamlit_role`/`streamlit_svc` (Gold-only read access,
+      own key pair) for local; app-owner role + `GRANT USAGE ON STREAMLIT`
+      RBAC for SiS access gating
 
-### Phase 9.5 — Agent layer (MCP tools + tool-calling loop)
+### Phase 10 — Data quality / QC framing
 
-Moved after Phase 9, not before it - it doesn't make sense as a standalone
+- [ ] Reframe existing dbt tests explicitly as client-facing trust/QC rules
+- [ ] Lightweight data dictionary / lineage doc
+- [ ] Document raw/staging/marts → Bronze/Silver/Gold naming mapping
+- [ ] Streamlit QC status indicator, surfaced once the above trust/QC rules
+      exist to display — deferred from Phase 9 since there was nothing yet
+      to show
+
+### Phase 11 — Agent layer (MCP tools + tool-calling loop)
+
+Moved after Phase 10, not before it - it doesn't make sense as a standalone
 phase with nothing to integrate into yet. The chat panel's whole point is
 to embed _into_ the Streamlit app for "what and why" questions about what's
-on screen, so Streamlit needs to exist first for that integration point to
-be real rather than speculative. The MCP server itself is still
-independently demoable via Claude Desktop regardless of Streamlit, but the
-in-process embedding step specifically needs Phase 9 done.
+on screen, so Streamlit (Phase 9) and QC framing (Phase 10, which the chat
+panel may also want to answer questions about) need to exist first. The
+MCP server itself is still independently demoable via Claude Desktop
+regardless of Streamlit, but the in-process embedding step specifically
+needs Phase 9 done.
 
-- [ ] Blocked on Phase 6.5 (already done) and Phase 9 — tools must be
-      strategy-parameterized from the start (`strategy_used` as an
-      argument, not hardcoded), and there needs to be a Streamlit app to
-      embed the chat panel into
+- [ ] Blocked on Phase 6.5 (already done) and Phase 9 (done) — tools must
+      be strategy-parameterized from the start (`strategy_used` as an
+      argument, not hardcoded)
 - [ ] Scope MCP tool contracts: `get_holdings(strategy_used, ticker,
 as_of_date)`, `get_trade_history(strategy_used, symbol, start_date,
 end_date)`, `get_strategy_signal(strategy_used, symbol, date)`,
@@ -603,12 +697,6 @@ end_date)`, `get_strategy_signal(strategy_used, symbol, date)`,
 - [ ] Basic tracing (LangSmith or Langfuse) wired in from the start
 - [ ] Embed the agent as a chat panel in the Phase 9 Streamlit app
       (in-process, direct Python import — not another MCP round-trip)
-
-### Phase 10 — Data quality / QC framing
-
-- [ ] Reframe existing dbt tests explicitly as client-facing trust/QC rules
-- [ ] Lightweight data dictionary / lineage doc
-- [ ] Document raw/staging/marts → Bronze/Silver/Gold naming mapping
 
 ### Layer 2 — Live paper execution (scoping only, not started)
 
@@ -632,5 +720,7 @@ end_date)`, `get_strategy_signal(strategy_used, symbol, date)`,
 - **Orchestration**: Airflow (Docker Compose, LocalExecutor)
 - **ELT**: Fivetran (custom Connector SDK connector for Alpaca corporate
   actions, deployed and syncing)
-- **Planned**: Streamlit (client-facing dashboard),
-  MCP server + tool-calling agent (chat layer over pipeline data)
+- **Client-facing app**: Streamlit — local dev (`streamlit_role`/
+  `streamlit_svc`) and Streamlit in Snowflake (Workspaces, app-owner role +
+  `GRANT USAGE ON STREAMLIT` RBAC)
+- **Planned**: MCP server + tool-calling agent (chat layer over pipeline data)
