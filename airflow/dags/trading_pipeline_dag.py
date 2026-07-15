@@ -11,9 +11,13 @@ from strategies.configs import MeanReversionConfig
 from utils.snowflake_connection import snowflake_connection
 from main import step_2
 
-default_args = {"retries": 3, "retry_delay": timedelta(minutes=5)}
+default_args = {"retries": 3, "retry_delay": timedelta(minutes=1)}
 
-TICKERS = ["AAPL"]
+# Adding a new ticker requires a manual pull of historicals since we incrementally add new trade data each data.
+# You will also need to refresh portfolio_value
+# dbt run --select portfolio_value --full-refresh
+
+TICKERS = ["AAPL", "GOOGL"]
 STARTING_CASH = 10000
 BASE_POSITION_SIZE = 500
 MAX_MULTIPLIER = 3

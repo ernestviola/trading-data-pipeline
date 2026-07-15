@@ -57,7 +57,7 @@ def step_2(
 def main():
     STARTING_CASH = int(os.getenv("STARTING_CASH", 10000))
 
-    tickers = ["AAPL"]
+    tickers = ["AAPL", "GOOGL"]
     start = datetime(2023, 1, 1)
     end = datetime.now()
 
@@ -67,13 +67,13 @@ def main():
 
     step_1(tickers, start, end)
 
-    step_2(
-        tickers,
-        STARTING_CASH,
-        base_position_size,
-        max_multiplier,
-        shares_held,
-    )
+    # step_2(
+    #     tickers,
+    #     STARTING_CASH,
+    #     base_position_size,
+    #     max_multiplier,
+    #     shares_held,
+    # )
 
 
 if __name__ == "__main__":
