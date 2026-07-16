@@ -5,6 +5,15 @@ def get_connection():
     return st.connection("snowflake")
 
 
+@st.cache_data(ttl=300)
+def get_freshness():
+    return get_connection().query("""
+        select 
+        strategy_used, ticker, actual_date, expected_date, is_fresh 
+        from qc_portfolio_value_freshness;
+    """)
+
+
 def get_leaderboard():
     return get_connection().query("SELECT * FROM strategy_performance_summary;")
 
