@@ -47,11 +47,3 @@ nodes in the dbt lineage graph for what was physically one table.
 Connector SDK enforces one destination schema per connection with no
 post-creation rename, so this data physically lands in
 `alpaca_corporate_actions.raw_corporate_actions`, not `bronze.raw_corporate_actions`.
-
-**Status: not yet unified into dbt.** The original plan (documented in
-Phase 8) was to declare this as a dbt `source()` pointing at its actual
-schema, making "Bronze" a logical layer spanning physical schemas rather
-than one schema name — the same pattern already used for corporate actions
-in Fivetran generally. As of this doc, that `source()` declaration hasn't
-been written yet; `alpaca_corporate_actions.raw_corporate_actions` exists in
-Snowflake but has no dbt lineage node.
