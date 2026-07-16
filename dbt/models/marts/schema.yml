@@ -2,6 +2,11 @@ version: 2
 
 models:
   - name: holdings_scd2
+    description: >
+      SCD Type 2 history of share holdings per (strategy_used, ticker),
+      one row per holding period bounded by start_date/end_date. Type 2
+      rather than Type 1 because backtest integrity requires knowing what
+      a position was on a past date, not just its current value.
     columns:
       - name: ticker
         tests:
@@ -10,10 +15,14 @@ models:
         tests:
           - not_null
       - name: is_current
+        description: 'True on the most recent (open-ended) row per (strategy_used, ticker).'
         tests:
           - not_null
 
   - name: portfolio_value
+    description: >
+      Daily mark-to-market value of each simulated holding — incremental
+      fact table, grain (strategy_used, ticker, price_date).
     columns:
       - name: ticker
         tests:
@@ -22,9 +31,14 @@ models:
         tests:
           - not_null
       - name: market_value
+        description: 'shares_held * closing price on price_date. Semi-additive: summable across tickers on a given date, not across dates.'
         tests:
           - not_null
+
   - name: cash_position
+    description: >
+      SCD Type 2 history of simulated cash balance per (strategy_used,
+      ticker), one row per period between trades.
     columns:
       - name: ticker
         tests:
@@ -33,10 +47,16 @@ models:
         tests:
           - not_null
       - name: is_current
+        description: 'True on the most recent (open-ended) row per (strategy_used, ticker).'
         tests:
           - not_null
 
   - name: strategy_performance_summary
+    description: >
+      Current leaderboard view: latest ending value and percent return per
+      (strategy_used, ticker), computed fresh from portfolio_value and
+      cash_position on every query — not materialized, since it's a cheap
+      read on already-computed data.
     columns:
       - name: ticker
         tests:
@@ -45,15 +65,25 @@ models:
         tests:
           - not_null
       - name: ending_value
+        description: 'cash_on_hand + market_value as of as_of_date.'
         tests:
           - not_null
       - name: pct_return
+        description: '(ending_value - starting_cash) / starting_cash. Used over raw dollar gain for a fair comparison across strategies.'
         tests:
           - not_null
 
   - name: qc_portfolio_value_freshness
+    description: >
+      Client-facing trust check: for each (strategy_used, ticker), compares
+      the latest price_date in portfolio_value against the most recent
+      trading day on or before today (from stg_market_calendar). Known
+      limitation: a pair with zero rows ever loaded won't appear here at
+      all — this only catches staleness, not total absence.
     columns:
       - name: is_fresh
+        description: "False if actual_date doesn't match the expected most recent trading day."
         tests:
           - accepted_values:
-              values: [true]
+              arguments:
+                values: [true]

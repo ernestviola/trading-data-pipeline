@@ -1,4 +1,4 @@
 select
   market_date
 from 
-  {{source('raw',('raw_market_calendar'))}}
+  {{ref('raw_market_calendar')}}

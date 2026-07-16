@@ -2,9 +2,20 @@ version: 2
 
 seeds:
   - name: raw_market_calendar
+    description: >
+      Trading calendar seeded from Alpaca's calendar API — one row per
+      market day, with open/close times. Dbt-owned (not externally loaded),
+      refreshed manually via trading-scripts/get_market_calendar.py.
     config:
       schema: bronze
       column_types:
         market_date: DATE
         open: TIMESTAMP_NTZ
         close: TIMESTAMP_NTZ
+    columns:
+      - name: market_date
+        description: 'Calendar date the market was open for trading.'
+      - name: open
+        description: 'Exchange-local market open time. Not currently consumed downstream.'
+      - name: close
+        description: 'Exchange-local market close time. Not currently consumed downstream.'

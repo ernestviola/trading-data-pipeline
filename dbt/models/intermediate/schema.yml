@@ -2,6 +2,10 @@ version: 2
 
 models:
   - name: int_position_cost_basis
+    description: >
+      Recursive running position per (strategy_used, ticker): shares held and
+      cost basis after each trade, replayed in trade_date order. Feeds
+      holdings_scd2.
     columns:
       - name: ticker
         tests:
@@ -12,7 +16,12 @@ models:
       - name: shares_held
         tests:
           - not_null
+
   - name: int_portfolio_cash
+    description: >
+      Recursive running cash balance per (strategy_used, ticker), starting
+      from a fixed simulated cash amount and replaying each trade's effect
+      on cash in order. Feeds cash_position.
     columns:
       - name: ticker
         tests:
@@ -24,11 +33,25 @@ models:
         tests:
           - not_null
       - name: rn
+        description: >
+          Row number of this trade within its (strategy_used, ticker)
+          partition, ordered by trade_date then signal_strength. Unique only
+          within a partition, not across the whole table — see the
+          combination test below.
         tests:
           - not_null
     tests:
       - dbt_utils.unique_combination_of_columns:
-          combination_of_columns:
-            - strategy_used
-            - ticker
-            - rn
+          arguments:
+            combination_of_columns:
+              - strategy_used
+              - ticker
+              - rn
+          config:
+            description: >
+              Guards against two rows sharing the same trade sequence
+              position within the same strategy/ticker replay — a real bug
+              class in this pipeline: several earlier tests only checked
+              uniqueness on rn alone, which is trivially violated by design
+              once multiple strategies exist (rn legitimately restarts at 1
+              per strategy/ticker pair).

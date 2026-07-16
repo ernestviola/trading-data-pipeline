@@ -1,0 +1,16 @@
+version: 2
+
+tests:
+  - name: assert_no_overlapping_scd2_ranges
+    description: >
+      Client-facing trust rule: a single (strategy_used, ticker) cannot have
+      two overlapping holding periods in holdings_scd2 — at any point in
+      time, a position's share count must be unambiguous. A violation means
+      backtest math for that pair is not trustworthy.
+
+  - name: assert_single_current_cash_position
+    description: >
+      Client-facing trust rule: a single (strategy_used, ticker) must have
+      exactly one open-ended (is_current) cash position at a time. More
+      than one means the simulated cash balance is ambiguous and any
+      ending_value/pct_return derived from it cannot be trusted.

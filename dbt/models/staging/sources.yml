@@ -7,6 +7,4 @@ sources:
       - name: raw_prices
         description: Landed OHLCV data from Alpaca
       - name: raw_trades
-        description: Generated trade events from the strategy engine, append-only.
-      - name: raw_market_calendar
-        description: Seeded market calendar data from Alpaca
+        description: Generated trade events from the strategy engine.
