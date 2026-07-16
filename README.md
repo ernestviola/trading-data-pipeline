@@ -76,9 +76,6 @@ schema/prefix mapping.
 - A Snowflake account
 - An Alpaca account (API key/secret — paper trading is sufficient)
 - `openssl` (for generating Snowflake key-pair auth credentials)
-- A running Postgres instance for Airflow's own metadata store (not
-  provisioned by this repo — run your own container or point at an
-  existing instance)
 
 ### 1. Snowflake setup
 
@@ -204,8 +201,8 @@ A conversational "what and why" layer over the pipeline's data, embedded as
 a chat panel in the Streamlit app rather than replacing it.
 
 - [ ] Scope MCP tool contracts: `get_holdings(strategy_used, ticker,
-  as_of_date)`, `get_trade_history(strategy_used, symbol, start_date,
-  end_date)`, `get_strategy_signal(strategy_used, symbol, date)`,
+as_of_date)`, `get_trade_history(strategy_used, symbol, start_date,
+end_date)`, `get_strategy_signal(strategy_used, symbol, date)`,
       `get_performance_summary(strategy_used, start_date, end_date)`
 - [ ] Build MCP server (Python `mcp` SDK, stdio transport)
 - [ ] Verify tools work via `claude mcp add` in Claude Desktop
