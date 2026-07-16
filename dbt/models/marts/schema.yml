@@ -50,3 +50,10 @@ models:
       - name: pct_return
         tests:
           - not_null
+
+  - name: qc_portfolio_value_freshness
+    columns:
+      - name: is_fresh
+        tests:
+          - accepted_values:
+              values: [true]

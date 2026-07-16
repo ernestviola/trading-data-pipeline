@@ -26,4 +26,9 @@ models:
       - name: rn
         tests:
           - not_null
-          - unique
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns:
+            - strategy_used
+            - ticker
+            - rn
