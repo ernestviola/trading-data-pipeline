@@ -55,6 +55,11 @@ flowchart TD
 - `streamlit_role` — read-only on Gold only. Used by the Streamlit app
   (`streamlit_svc` service user, own key pair) — narrower than
   `transformer_role` since the dashboard never needs Silver.
+- `fivetran_role` — write access to Bronze (`CREATE TABLE`/`STAGE`/
+  `FILE FORMAT`, `SELECT`/`INSERT`/`UPDATE`/`DELETE`). Used by the custom
+  Fivetran Connector SDK connector for corporate actions — a separate role
+  from `loader_role` for the same auditable, independently revocable
+  blast-radius reasoning as the rest of the role split.
 - `SYSADMIN` — read access across all three schemas, for manual browsing
   without switching roles. `ACCOUNTADMIN` is left untouched, reserved for
   account-level operations.
@@ -130,7 +135,31 @@ dbt test
 dbt docs generate && dbt docs serve --port 8081   # avoids clashing with Airflow's :8080
 ```
 
-### 6. Streamlit
+### 6. Fivetran connector (corporate actions)
+
+Create `fivetran/alpaca_corporate_actions/configuration.json` (gitignored,
+not committed) with:
+
+```json
+{
+  "APCA-API-KEY-ID": "...",
+  "APCA-API-SECRET-KEY": "...",
+  "SYMBOLS": "..."
+}
+```
+
+Then deploy:
+
+```bash
+cd fivetran/alpaca_corporate_actions
+fivetran deploy --api-key <api-key> --destination Warehouse --connection alpaca_corporate_actions --configuration configuration.json
+```
+
+Lands corporate actions data in `alpaca_corporate_actions.raw_corporate_actions`
+(a separate schema — see [`docs/naming-conventions.md`](docs/naming-conventions.md)
+for why).
+
+### 7. Streamlit
 
 ```bash
 cd streamlit
@@ -175,8 +204,8 @@ A conversational "what and why" layer over the pipeline's data, embedded as
 a chat panel in the Streamlit app rather than replacing it.
 
 - [ ] Scope MCP tool contracts: `get_holdings(strategy_used, ticker,
-    as_of_date)`, `get_trade_history(strategy_used, symbol, start_date,
-    end_date)`, `get_strategy_signal(strategy_used, symbol, date)`,
+  as_of_date)`, `get_trade_history(strategy_used, symbol, start_date,
+  end_date)`, `get_strategy_signal(strategy_used, symbol, date)`,
       `get_performance_summary(strategy_used, start_date, end_date)`
 - [ ] Build MCP server (Python `mcp` SDK, stdio transport)
 - [ ] Verify tools work via `claude mcp add` in Claude Desktop
