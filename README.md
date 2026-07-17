@@ -250,3 +250,6 @@ first.
   (`gather_historicals.py`) isn't documented yet
 - `raw_corporate_actions` isn't yet declared as a dbt `source()` — it lands
   via Fivetran but has no dbt lineage node today
+- Order error where dbt doesn't run to calculate freshness when any dependency
+  tasks in airflow fail. e.g. 403 error on Alpaca causing the first task to fail
+  having downstream effects on DBT

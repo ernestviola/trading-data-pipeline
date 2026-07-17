@@ -1,14 +1,3 @@
--- Phase 6: Snowflake Bronze DDL — raw_prices, raw_trades (+ staging tables)
--- Run as transformer_role or loader_role (whichever owns table creation) in a Snowsight worksheet.
--- Translated from sql/001_setup_raw_prices.sql (Postgres).
---
--- Type/design notes vs. Postgres original:
---   TIMESTAMPTZ -> TIMESTAMP_NTZ: Alpaca daily OHLCV timestamps are UTC-normalized with no
---     per-row timezone variance, so timezone-aware storage isn't needed. Treated as naive UTC.
---   TEXT / FLOAT8 map directly (Snowflake aliases TEXT -> VARCHAR, FLOAT8 -> FLOAT/DOUBLE).
---   "timestamp" stays quoted (reserved word in Snowflake, same as Postgres).
---   open/close/volume unquoted — not reserved words in Snowflake.
-
 USE ROLE loader_role;
 USE WAREHOUSE trading_pipeline_wh;
 USE DATABASE trading_pipeline;

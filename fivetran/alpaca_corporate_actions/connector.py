@@ -188,25 +188,6 @@ def update(configuration: dict, state: dict):
 
 
 def get_data(api_key, api_secret_key, start, end, symbols):
-    """
-    This function simulates fetching data from a source.
-    In a real-world scenario, this would involve making API calls or database queries.
-
-    TODO: Replace this with your actual data fetching logic.
-    - Add pagination if your source supports it
-    - Filter by last_sync_time for incremental syncs
-    - Add retry logic for API calls
-    - Handle rate limiting
-
-    Args:
-        last_sync_time: The last sync time to fetch data from (for incremental syncs).
-                        None for full syncs.
-    Returns:
-        A list of dictionaries representing the data to be upserted.
-    """
-    # Simulate data fetching logic
-    # For starter template, return simple user test data
-    # In production, replace this with actual API calls or database queries
 
     client = CorporateActionsClient(api_key=api_key, secret_key=api_secret_key)
     request = CorporateActionsRequest(symbols=symbols, start=start, end=end, limit=None)

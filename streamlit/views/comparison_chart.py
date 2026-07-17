@@ -3,7 +3,7 @@ from queries import get_tickers, get_comparison_chart
 
 st.title("Strategy Comparison")
 st.write("Comparison of strategies per ticker based on a $10,000 initial account.")
-st.write("Total value includes the combined cash amount and shares market value.")
+st.write("Account value is the combined cash value and shares market value.")
 
 available_tickers = get_tickers()
 ticker = st.selectbox("Ticker", options=available_tickers["TICKER"].tolist())
@@ -15,6 +15,6 @@ if ticker:
         x="PRICE_DATE",
         x_label="Date",
         y="TOTAL_VALUE",
-        y_label="Total Value",
+        y_label="Account Value",
         color="STRATEGY_USED",
     )

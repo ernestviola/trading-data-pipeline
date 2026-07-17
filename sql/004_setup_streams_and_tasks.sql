@@ -1,36 +1,3 @@
-{# 
-WARNING: this stream is an example only. DATA may be incorrect due to the way raw_trades is created.
-
-This stream is append only from raw_trades, but raw_trades recalcs all data based on input values which may change.
-
-There is no way to tell which rows belongs to which stream.
-
- #}
-
-
--- Phase 7: Snowflake Streams & Tasks for incremental processing.
---
--- This is a deliberately standalone path, not wired into Airflow/dbt. It
--- demonstrates the native Snowflake CDC pattern: a Stream tracks new rows
--- landed in Bronze since it was last read, and a Task fires a stored
--- procedure that MERGEs only those changed rows into a Silver-equivalent
--- target - no re-scan of the full table, unlike a dbt run.
---
--- silver.stg_trades_streaming intentionally mirrors dbt's stg_trades model
--- (dbt/models/staging/stg_trades.sql) in shape, but is NOT a dbt model and
--- is not referenced by any dbt model - keeps the two paths (dbt-batch vs.
--- Snowflake-native-incremental) cleanly separate for comparison.
---
--- Run as a role with ownership/grant privileges on bronze + silver schemas
--- (e.g. SYSADMIN), except the final EXECUTE TASK grant, which requires
--- ACCOUNTADMIN.
-
--- ── Grants (one-time) ────────────────────────────────────────────────────
--- transformer_role already has read-only on Bronze and read/write on
--- Silver/Gold (see README RBAC notes) - just needs the DDL privileges to
--- create these objects, plus account-level permission to actually run a
--- scheduled task (not just CALL it manually).
-
 GRANT CREATE STREAM ON SCHEMA bronze TO ROLE transformer_role;
 GRANT CREATE PROCEDURE ON SCHEMA silver TO ROLE transformer_role;
 GRANT CREATE TASK ON SCHEMA bronze TO ROLE transformer_role;

@@ -1,6 +1,3 @@
--- Phase 6: Snowflake internal stage + file format for Bronze CSV loads
--- Run as loader_role in a Snowsight worksheet.
-
 USE ROLE loader_role;
 USE WAREHOUSE trading_pipeline_wh;
 USE DATABASE trading_pipeline;

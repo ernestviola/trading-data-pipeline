@@ -1,6 +1,3 @@
--- Phase 6: Snowflake setup — warehouse, database, Medallion schemas, roles
--- Run as ACCOUNTADMIN in a Snowsight worksheet.
-
 -- ============================================================
 -- Warehouse
 -- ============================================================
